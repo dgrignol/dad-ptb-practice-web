@@ -178,10 +178,9 @@ button:disabled {
 }
 
 .question-overlay {
-  background: transparent;
+  background: rgba(2, 6, 23, 0.58);
   pointer-events: none;
-  align-content: start;
-  padding-top: 28px;
+  place-content: center;
 }
 
 .question-overlay h3,

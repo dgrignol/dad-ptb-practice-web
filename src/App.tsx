@@ -361,7 +361,7 @@ function App() {
 
   // Section: redraw final frame while question prompt is on screen, with dot hidden.
   useEffect(() => {
-    if (phase !== 'question' || !activePlan || !inputDataset) {
+    if (phase !== 'question' || !inputDataset) {
       return;
     }
 
@@ -375,10 +375,16 @@ function App() {
       return;
     }
 
-    const source = sourceTrialByIndex(inputDataset, activePlan.sourceIndex);
+    const questionPlan = activePlan ?? activePlanRef.current;
+    if (!questionPlan) {
+      drawIdleFrame(context, canvas, 'Question');
+      return;
+    }
+
+    const source = sourceTrialByIndex(inputDataset, questionPlan.sourceIndex);
     const altSource =
-      activePlan.catchAltSourceIndex !== null
-        ? sourceTrialByIndex(inputDataset, activePlan.catchAltSourceIndex)
+      questionPlan.catchAltSourceIndex !== null
+        ? sourceTrialByIndex(inputDataset, questionPlan.catchAltSourceIndex)
         : null;
 
     drawTrialFrame({
@@ -386,7 +392,7 @@ function App() {
       canvas,
       source,
       altSource,
-      plan: activePlan,
+      plan: questionPlan,
       runIndex: currentRunIndex,
       frameIndex: Math.max(0, inputDataset.framesPerTrial - 1),
       hideDot: true,
@@ -395,7 +401,14 @@ function App() {
 
   // Section: question phase keyboard/timeout handling.
   useEffect(() => {
-    if (phase !== 'question' || !activePlan) {
+    if (phase !== 'question') {
+      return;
+    }
+
+    const questionPlan = activePlan ?? activePlanRef.current;
+    if (!questionPlan || !session) {
+      setPhase('error');
+      setStatusText('Question phase failed: missing trial context.');
       return;
     }
 
@@ -408,16 +421,11 @@ function App() {
       }
       resolved = true;
 
-      const plan = activePlanRef.current;
-      if (!plan || !session) {
-        return;
-      }
-
       const responseLabel: 'none' | 'yes' | 'no' =
         responseCode === 1 ? 'yes' : responseCode === 2 ? 'no' : 'none';
       const rtMs = responseCode > 0 ? Math.round(performance.now() - questionStartMsRef.current) : null;
       const responseCorrect =
-        responseCode > 0 ? (Number(responseCode === plan.catchExpectedResponseCode) as 0 | 1) : null;
+        responseCode > 0 ? (Number(responseCode === questionPlan.catchExpectedResponseCode) as 0 | 1) : null;
 
       const completedBefore =
         currentRunIndex === 1
@@ -426,24 +434,24 @@ function App() {
 
       const trialResult: TrialRuntimeResult = {
         runIndex: currentRunIndex,
-        executedTrialIndex: plan.executedTrialIndex,
-        sourceIndex: plan.sourceIndex,
-        sourceTrialId: plan.sourceTrialId,
-        sourceConditionLabel: plan.sourceConditionLabel,
-        sourcePathId: plan.sourcePathId,
-        catchTypeCode: plan.catchTypeCode,
-        catchTypeLabel: plan.catchTypeLabel,
-        catchExpectedResponseCode: plan.catchExpectedResponseCode,
+        executedTrialIndex: questionPlan.executedTrialIndex,
+        sourceIndex: questionPlan.sourceIndex,
+        sourceTrialId: questionPlan.sourceTrialId,
+        sourceConditionLabel: questionPlan.sourceConditionLabel,
+        sourcePathId: questionPlan.sourcePathId,
+        catchTypeCode: questionPlan.catchTypeCode,
+        catchTypeLabel: questionPlan.catchTypeLabel,
+        catchExpectedResponseCode: questionPlan.catchExpectedResponseCode,
         catchResponseCode: responseCode,
         catchResponseLabel: responseLabel,
         catchResponseCorrect: responseCorrect,
         catchResponseRtMs: rtMs,
         catchTimedOut: timedOut,
-        catchBranchChangedPath: plan.catchBranchChangedPath,
-        catchDisappearFrame: plan.catchDisappearFrame,
-        catchReappearFrame: plan.catchReappearFrame,
-        catchAltSourceIndex: plan.catchAltSourceIndex,
-        catchAltPathId: plan.catchAltPathId,
+        catchBranchChangedPath: questionPlan.catchBranchChangedPath,
+        catchDisappearFrame: questionPlan.catchDisappearFrame,
+        catchReappearFrame: questionPlan.catchReappearFrame,
+        catchAltSourceIndex: questionPlan.catchAltSourceIndex,
+        catchAltPathId: questionPlan.catchAltPathId,
         plannedRunTrials: currentRunIndex === 1 ? session.runPlans.run1.length : session.runPlans.run2.length,
         completedRunTrialsAtRecord: completedBefore + 1,
         startedAtIso: trialStartIsoRef.current,
@@ -464,7 +472,7 @@ function App() {
       setPhase('feedback');
 
       const runPlans = currentRunIndex === 1 ? updated.runPlans.run1 : updated.runPlans.run2;
-      const nextTrial = plan.executedTrialIndex + 1;
+      const nextTrial = questionPlan.executedTrialIndex + 1;
 
       if (nextTrial <= runPlans.length) {
         const nextPlan = runPlans[nextTrial - 1];
@@ -514,10 +522,7 @@ function App() {
     if (query.testMode) {
       const autoHandle = window.setTimeout(() => {
         // In test mode, respond with expected answer for deterministic checks.
-        const plan = activePlanRef.current;
-        if (plan) {
-          commitResponse(plan.catchExpectedResponseCode, false);
-        }
+        commitResponse(questionPlan.catchExpectedResponseCode, false);
       }, 200);
 
       return () => {
@@ -1041,6 +1046,39 @@ function drawTrialFrame(args: DrawTrialFrameArgs): void {
   context.fillStyle = '#9ca3af';
   context.font = '13px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace';
   context.fillText(`Run ${runIndex} | Trial ${plan.executedTrialIndex} | Frame ${frameIndex + 1}`, 36, 22);
+}
+
+function drawIdleFrame(
+  context: CanvasRenderingContext2D,
+  canvas: HTMLCanvasElement,
+  label: string,
+): void {
+  const arenaRect = getArenaRect(canvas);
+
+  context.fillStyle = '#080b12';
+  context.fillRect(0, 0, canvas.width, canvas.height);
+
+  context.fillStyle = '#000000';
+  context.fillRect(arenaRect.x, arenaRect.y, arenaRect.size, arenaRect.size);
+
+  context.strokeStyle = '#1f2937';
+  context.lineWidth = 2;
+  context.strokeRect(arenaRect.x, arenaRect.y, arenaRect.size, arenaRect.size);
+
+  const cx = canvas.width / 2;
+  const cy = canvas.height / 2;
+  context.strokeStyle = '#e5e7eb';
+  context.lineWidth = 2;
+  context.beginPath();
+  context.moveTo(cx - 10, cy);
+  context.lineTo(cx + 10, cy);
+  context.moveTo(cx, cy - 10);
+  context.lineTo(cx, cy + 10);
+  context.stroke();
+
+  context.fillStyle = '#9ca3af';
+  context.font = '13px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace';
+  context.fillText(label, 36, 22);
 }
 
 /**
