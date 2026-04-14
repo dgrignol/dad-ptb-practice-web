@@ -359,7 +359,7 @@ function App() {
     };
   }, [activePlan, currentRunIndex, inputDataset, phase]);
 
-  // Section: keep a visible final-frame snapshot while the question prompt is on screen.
+  // Section: redraw final frame while question prompt is on screen, with dot hidden.
   useEffect(() => {
     if (phase !== 'question' || !activePlan || !inputDataset) {
       return;
@@ -389,7 +389,7 @@ function App() {
       plan: activePlan,
       runIndex: currentRunIndex,
       frameIndex: Math.max(0, inputDataset.framesPerTrial - 1),
-      forceDotVisible: true,
+      hideDot: true,
     });
   }, [activePlan, currentRunIndex, inputDataset, phase]);
 
@@ -841,6 +841,13 @@ function App() {
             </button>
           </div>
         )}
+
+        {phase === 'session_complete' && (
+          <div className="overlay question-overlay">
+            <h3>Practice complete</h3>
+            <p>You can try again by pressing R.</p>
+          </div>
+        )}
       </section>
 
       {phase === 'session_complete' && session && exports && (
@@ -930,7 +937,7 @@ interface DrawTrialFrameArgs {
   runIndex: 1 | 2;
   frameIndex: number;
   fixationFeedback?: FixationFeedback;
-  forceDotVisible?: boolean;
+  hideDot?: boolean;
 }
 
 /**
@@ -946,7 +953,7 @@ function drawTrialFrame(args: DrawTrialFrameArgs): void {
     runIndex,
     frameIndex,
     fixationFeedback = 'neutral',
-    forceDotVisible = false,
+    hideDot = false,
   } = args;
   const frameOneBased = frameIndex + 1;
   const arenaRect = getArenaRect(canvas);
@@ -999,8 +1006,8 @@ function drawTrialFrame(args: DrawTrialFrameArgs): void {
     visible = !isPointFullyOccludedByPathband(source, point, frameOneBased);
   }
 
-  if (forceDotVisible) {
-    visible = true;
+  if (hideDot) {
+    visible = false;
   }
 
   // Section: draw dot and fixation.
