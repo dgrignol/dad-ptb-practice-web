@@ -22,9 +22,10 @@ Mapped behaviors:
 - Refresh-aware input selection/generation.
 - Practice-mode run trimming and catch forcing.
 - Run 1 type-1 catch behavior (disappear/reappear with optional changed path).
-- Run 2 type-2 catch behavior (occlusion question).
+- Run 2 type-2 catch behavior (path-band occlusion question with pre/post segments).
 - Catch question timing, timeout handling, yes/no keyboard response mapping.
 - Per-run and per-catch-type summary metrics.
+- Strict 10x10 deg stimulus arena for trajectory generation/render mapping (no boundary bounce).
 
 ## Stack
 - Vite + React + TypeScript
@@ -71,6 +72,14 @@ At session start:
 Important frame-scaling rule (preserved):
 - `framesPerTrial = round(2.67 * fps)`
 - Therefore 60 Hz has half samples of 120 Hz.
+
+## Spatial/Occlusion Fidelity Notes
+- Trajectory generation keeps dot centers inside a strict `[-5,+5]` x `[-5,+5]` deg arena with dot-size margin, so paths stay fully inside a 10x10 deg square.
+- No boundary bounce is used; infeasible trajectories are rejected and regenerated deterministically.
+- Run 2 renders path-band occluders with frame-wise activation:
+  - Pre-deviance segment active before deviance anchor.
+  - Post-deviance segment active from deviance anchor onward.
+- Dot visibility in run 2 uses the same full-occlusion geometric threshold used to derive occlusion timing metadata.
 
 ## Keyboard Mapping (Robust Across Browsers)
 Mappings use `KeyboardEvent.code` (not layout-dependent key names):

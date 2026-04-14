@@ -31,7 +31,7 @@ export const DEFAULT_PRACTICE_CONFIG: PracticeConfig = {
   },
 };
 
-export const DATASET_VERSION = 'web_v1_ptb_v28_v21_practice';
+export const DATASET_VERSION = 'web_v2_ptb_v28_v21_practice_pathband';
 
 export const TRIAL_DURATION_SEC = 2.67;
 export const TRIALS_PER_CONDITION = 20;

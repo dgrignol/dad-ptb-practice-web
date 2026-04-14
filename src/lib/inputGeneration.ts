@@ -3,14 +3,16 @@
  *
  * Purpose:
  *   Deterministic browser-side generation and caching of shared practice input
- *   datasets, mirroring the PTB practice intent:
- *   - one shared input for all participants,
- *   - refresh-aware fps variants,
- *   - run base orders aligned to v21 schedule model,
- *   - frame scaling where 60 Hz has half samples of 120 Hz.
+ *   datasets, with geometry and timing behavior aligned more closely to the
+ *   PTB V28/v21 practice stack:
+ *   - strict 10x10 deg arena occupancy (no boundary bounce),
+ *   - paired nondeviant/deviant trajectory generation with shared feasible
+ *     placement,
+ *   - fixed-frame deviance/occlusion anchors scaled by fps,
+ *   - path-band pre/post metadata for occlusion trials.
  *
  * Usage example:
- *   const { dataset, wasGenerated } = getOrCreateSharedInputForFps({
+ *   const { dataset } = getOrCreateSharedInputForFps({
  *     fps: 60,
  *     sharedInputSubjectId: 91,
  *     sharedRandomSeed: 9101,
@@ -41,7 +43,58 @@ interface InputSelectionResult {
   storageKey: string;
 }
 
+interface PathbandMetadata {
+  preXY: Point2D[];
+  postXY: Point2D[];
+  widthDeg: number;
+  halfWidthDeg: number;
+  preAnchorFrame: number;
+  postAnchorFrame: number;
+  postDeactivateFrame: number;
+  terminalStyle: 'round' | 'straight';
+}
+
+interface OcclusionTiming {
+  occlusionStartFrame: number;
+  occlusionCompleteFrame: number;
+  occlusionEndFrame: number;
+  occlusionEndCompleteFrame: number;
+}
+
+interface TrajectoryPair {
+  nondeviant: Point2D[];
+  deviant: Point2D[];
+}
+
 const STORAGE_PREFIX = 'dadPracticeInput';
+
+// Section: geometric constants aligned with PTB config values.
+const DOT_WIDTH_DEG = 0.51442;
+const DOT_RADIUS_DEG = DOT_WIDTH_DEG / 2;
+const ARENA_SIZE_DEG = 10;
+const ARENA_HALF_SIZE_DEG = ARENA_SIZE_DEG / 2;
+const ARENA_MIN_DOT_CENTER = -ARENA_HALF_SIZE_DEG + DOT_RADIUS_DEG;
+const ARENA_MAX_DOT_CENTER = ARENA_HALF_SIZE_DEG - DOT_RADIUS_DEG;
+
+const PATH_BAND_WIDTH_MULTIPLIER = 1.1;
+const PATH_BAND_MIN_MARGIN_DEG = 0.005;
+const PATH_BAND_WIDTH_DEG = Math.max(
+  DOT_WIDTH_DEG * PATH_BAND_WIDTH_MULTIPLIER,
+  DOT_WIDTH_DEG + PATH_BAND_MIN_MARGIN_DEG,
+);
+
+const INITIAL_CURVATURE_WINDOWS: Array<[number, number]> = [
+  [-0.8, -0.3755],
+  [0.3755, 0.8],
+];
+
+const DEVIANT_TURN_WINDOWS_DEG: Array<[number, number]> = [
+  [-81, -10],
+  [10, 81],
+];
+
+const TURN_RESCUE_SCALE_GRID = [1.0, 0.85, 0.7, 0.55, 0.4, 0.25, 0.1, 0.0];
+const MAX_TRAJECTORY_ATTEMPTS = 60000;
 
 /**
  * Resolve and cache the shared deterministic dataset for one target fps.
@@ -68,7 +121,7 @@ export function getOrCreateSharedInputForFps(args: InputSelectionArgs): InputSel
   try {
     window.localStorage.setItem(storageKey, JSON.stringify(generated));
   } catch {
-    // Ignore cache write failures (private mode/storage limits) and proceed.
+    // Ignore cache write failures and keep runtime behavior functional.
   }
 
   return {
@@ -85,7 +138,7 @@ export function generateSharedDataset(args: InputSelectionArgs): SharedInputData
   const fps = Math.max(30, Math.min(240, Math.round(args.fps)));
   const framesPerTrial = Math.max(2, Math.round(TRIAL_DURATION_SEC * fps));
 
-  // Section: derive fixed timeline frames by scaling PTB 120 Hz defaults.
+  // Section: scale fixed V28 anchors from 120 Hz reference.
   const fixedDevianceFrame = clampFrame(
     Math.round(BASE_FIXED_DEVIANCE_FRAME * (fps / BASE_GENERATION_FPS)),
     framesPerTrial,
@@ -94,59 +147,51 @@ export function generateSharedDataset(args: InputSelectionArgs): SharedInputData
     Math.round(BASE_FIXED_OCCLUSION_END_FRAME * (fps / BASE_GENERATION_FPS)),
     framesPerTrial,
   );
-  const occlusionStartFrame = clampFrame(
-    fixedDevianceFrame - Math.round(0.12 * fps),
-    framesPerTrial,
-  );
-  const occlusionEndCompleteFrame = clampFrame(
-    fixedOcclusionEndFrame + Math.round(0.22 * fps),
-    framesPerTrial,
-  );
 
-  // Section: deterministic base trajectory generation (shared across participants).
+  // Section: deterministic source generation using subject seed.
   const trajectoryRng = createSeededRng(args.sharedInputSubjectId);
   const sourceTrials: SourceTrial[] = [];
 
   for (let sequenceId = 1; sequenceId <= TRIALS_PER_CONDITION; sequenceId += 1) {
-    const speedPerFrame = 3.73 / fps;
-
-    // Keep headings mostly rightward to match practice motion readability.
-    const baseHeadingRad = toRad(sampleRange(trajectoryRng, -20, 20));
-    const curvatureDeg = sampleSignedInWindows(trajectoryRng, [
-      [-0.8, -0.3755],
-      [0.3755, 0.8],
-    ]);
-    const curvatureRad = toRad(curvatureDeg);
-
-    const devTurnDeg = sampleSignedInWindows(trajectoryRng, [
-      [-81, -10],
-      [10, 81],
-    ]);
-    const devTurnRad = toRad(devTurnDeg);
-
-    const startX = sampleRange(trajectoryRng, -4.5, -2.0);
-    const startY = sampleRange(trajectoryRng, -2.5, 2.5);
-
-    const nondeviant = generateTrajectory({
+    const pair = generatePairedTrajectories({
+      rng: trajectoryRng,
+      fps,
       framesPerTrial,
-      startX,
-      startY,
-      baseHeadingRad,
-      curvatureRad,
-      speedPerFrame,
       devianceFrame: fixedDevianceFrame,
-      devTurnRad: 0,
     });
 
-    const deviant = generateTrajectory({
-      framesPerTrial,
-      startX,
-      startY,
-      baseHeadingRad,
-      curvatureRad,
-      speedPerFrame,
+    const nondevPathband = buildPathbandMetadata({
+      xyPre: pair.nondeviant,
+      xyPost: pair.nondeviant,
       devianceFrame: fixedDevianceFrame,
-      devTurnRad,
+      holdEndFrame: fixedOcclusionEndFrame,
+      framesPerTrial,
+    });
+
+    const devPathband = buildPathbandMetadata({
+      xyPre: pair.nondeviant,
+      xyPost: pair.deviant,
+      devianceFrame: fixedDevianceFrame,
+      holdEndFrame: fixedOcclusionEndFrame,
+      framesPerTrial,
+    });
+
+    const timingNondev = derivePathbandOcclusionTiming({
+      trialXY: pair.nondeviant,
+      pathband: nondevPathband,
+      devianceFrame: fixedDevianceFrame,
+      fps,
+      fallbackOcclusionEndFrame: fixedOcclusionEndFrame,
+      framesPerTrial,
+    });
+
+    const timingDev = derivePathbandOcclusionTiming({
+      trialXY: pair.deviant,
+      pathband: devPathband,
+      devianceFrame: fixedDevianceFrame,
+      fps,
+      fallbackOcclusionEndFrame: fixedOcclusionEndFrame,
+      framesPerTrial,
     });
 
     const alwaysVisible = makeSourceTrial({
@@ -154,12 +199,10 @@ export function generateSharedDataset(args: InputSelectionArgs): SharedInputData
       sequenceId,
       conditionCode: -1,
       conditionLabel: 'always_visible',
-      xy: nondeviant,
-      devianceFrame: fixedDevianceFrame,
-      occlusionStartFrame,
-      occlusionCompleteFrame: fixedDevianceFrame,
-      occlusionEndFrame: fixedOcclusionEndFrame,
-      occlusionEndCompleteFrame,
+      occlusionEnabled: false,
+      xy: pair.nondeviant,
+      timing: timingNondev,
+      pathband: nondevPathband,
     });
 
     const occludedNondeviant = makeSourceTrial({
@@ -167,12 +210,10 @@ export function generateSharedDataset(args: InputSelectionArgs): SharedInputData
       sequenceId,
       conditionCode: 0,
       conditionLabel: 'occluded_nondeviant',
-      xy: nondeviant,
-      devianceFrame: fixedDevianceFrame,
-      occlusionStartFrame,
-      occlusionCompleteFrame: fixedDevianceFrame,
-      occlusionEndFrame: fixedOcclusionEndFrame,
-      occlusionEndCompleteFrame,
+      occlusionEnabled: true,
+      xy: pair.nondeviant,
+      timing: timingNondev,
+      pathband: nondevPathband,
     });
 
     const occludedDeviant = makeSourceTrial({
@@ -180,12 +221,10 @@ export function generateSharedDataset(args: InputSelectionArgs): SharedInputData
       sequenceId,
       conditionCode: 45,
       conditionLabel: 'occluded_deviant',
-      xy: deviant,
-      devianceFrame: fixedDevianceFrame,
-      occlusionStartFrame,
-      occlusionCompleteFrame: fixedDevianceFrame,
-      occlusionEndFrame: fixedOcclusionEndFrame,
-      occlusionEndCompleteFrame,
+      occlusionEnabled: true,
+      xy: pair.deviant,
+      timing: timingDev,
+      pathband: devPathband,
     });
 
     sourceTrials.push(alwaysVisible, occludedNondeviant, occludedDeviant);
@@ -255,59 +294,93 @@ export function generateSharedDataset(args: InputSelectionArgs): SharedInputData
   };
 }
 
-interface MakeSourceTrialArgs {
-  sourceIndex: number;
-  sequenceId: number;
-  conditionCode: number;
-  conditionLabel: ConditionLabel;
-  xy: Point2D[];
-  devianceFrame: number;
-  occlusionStartFrame: number;
-  occlusionCompleteFrame: number;
-  occlusionEndFrame: number;
-  occlusionEndCompleteFrame: number;
-}
-
-function makeSourceTrial(args: MakeSourceTrialArgs): SourceTrial {
-  const pathFingerprint = `${args.conditionLabel}|${args.sequenceId}|${args.xy
-    .slice(0, 4)
-    .map((p) => `${p.x.toFixed(3)}:${p.y.toFixed(3)}`)
-    .join('|')}|${args.xy[args.xy.length - 1].x.toFixed(3)}:${args.xy[
-    args.xy.length - 1
-  ].y.toFixed(3)}`;
-
-  return {
-    sourceIndex: args.sourceIndex,
-    sourceTrialId: `trial_${String(args.sourceIndex).padStart(3, '0')}`,
-    sequenceId: args.sequenceId,
-    conditionCode: args.conditionCode,
-    conditionLabel: args.conditionLabel,
-    devianceFrame: args.devianceFrame,
-    occlusionStartFrame: args.occlusionStartFrame,
-    occlusionCompleteFrame: args.occlusionCompleteFrame,
-    occlusionEndFrame: args.occlusionEndFrame,
-    occlusionEndCompleteFrame: args.occlusionEndCompleteFrame,
-    pathId: `path_${fnv1aHash(pathFingerprint)}`,
-    xy: args.xy,
-  };
-}
-
-interface TrajectoryArgs {
+interface PairedTrajectoryArgs {
+  rng: () => number;
+  fps: number;
   framesPerTrial: number;
-  startX: number;
-  startY: number;
-  baseHeadingRad: number;
-  curvatureRad: number;
-  speedPerFrame: number;
   devianceFrame: number;
-  devTurnRad: number;
 }
 
-function generateTrajectory(args: TrajectoryArgs): Point2D[] {
+function generatePairedTrajectories(args: PairedTrajectoryArgs): TrajectoryPair {
+  const speedPerFrame = 3.73 / args.fps;
+
+  // Match V28 geometric floor logic for curvature feasibility.
+  const maxTurnRadiusDeg = (ARENA_SIZE_DEG - DOT_WIDTH_DEG) / 2;
+  const minAbsCurvatureDeg = toDeg(speedPerFrame / maxTurnRadiusDeg);
+
+  for (let attempt = 1; attempt <= MAX_TRAJECTORY_ATTEMPTS; attempt += 1) {
+    const initialDirectionDeg = sampleRange(args.rng, -180, 180);
+    let baselineCurvatureDeg = sampleSignedInWindows(args.rng, INITIAL_CURVATURE_WINDOWS);
+    if (Math.abs(baselineCurvatureDeg) < minAbsCurvatureDeg) {
+      baselineCurvatureDeg =
+        baselineCurvatureDeg === 0
+          ? minAbsCurvatureDeg * (args.rng() < 0.5 ? -1 : 1)
+          : Math.sign(baselineCurvatureDeg) * minAbsCurvatureDeg;
+    }
+
+    const sampledTurnDeg = sampleSignedInWindows(args.rng, DEVIANT_TURN_WINDOWS_DEG);
+
+    for (const turnScale of TURN_RESCUE_SCALE_GRID) {
+      const devTurnDeg = sampledTurnDeg * turnScale;
+
+      const relNondev = integrateRelativeTrajectory({
+        framesPerTrial: args.framesPerTrial,
+        speedPerFrame,
+        initialDirectionDeg,
+        curvatureDeg: baselineCurvatureDeg,
+        devianceFrame: args.devianceFrame,
+        devTurnDeg: 0,
+      });
+
+      const relDev = integrateRelativeTrajectory({
+        framesPerTrial: args.framesPerTrial,
+        speedPerFrame,
+        initialDirectionDeg,
+        curvatureDeg: baselineCurvatureDeg,
+        devianceFrame: args.devianceFrame,
+        devTurnDeg,
+      });
+
+      const sharedOffset = sampleFeasibleSharedOffset(relNondev, relDev, args.rng);
+      if (!sharedOffset) {
+        continue;
+      }
+
+      const nondeviant = translatePath(relNondev, sharedOffset.x, sharedOffset.y);
+      const deviant = translatePath(relDev, sharedOffset.x, sharedOffset.y);
+
+      if (!pathWithinBounds(nondeviant) || !pathWithinBounds(deviant)) {
+        continue;
+      }
+
+      return {
+        nondeviant,
+        deviant,
+      };
+    }
+  }
+
+  throw new Error(
+    `Failed to generate feasible paired trajectories inside ${ARENA_SIZE_DEG}x${ARENA_SIZE_DEG} deg arena.`,
+  );
+}
+
+interface RelativeTrajectoryArgs {
+  framesPerTrial: number;
+  speedPerFrame: number;
+  initialDirectionDeg: number;
+  curvatureDeg: number;
+  devianceFrame: number;
+  devTurnDeg: number;
+}
+
+function integrateRelativeTrajectory(args: RelativeTrajectoryArgs): Point2D[] {
   const points: Point2D[] = [];
-  let x = args.startX;
-  let y = args.startY;
-  let heading = args.baseHeadingRad;
+  let x = 0;
+  let y = 0;
+  let headingRad = toRad(args.initialDirectionDeg);
+  const curvatureRad = toRad(args.curvatureDeg);
+  const devTurnRad = toRad(args.devTurnDeg);
 
   for (let frame = 1; frame <= args.framesPerTrial; frame += 1) {
     points.push({ x, y });
@@ -316,27 +389,268 @@ function generateTrajectory(args: TrajectoryArgs): Point2D[] {
       continue;
     }
 
-    // Section: evolve heading and apply deviant turn from deviance onward.
-    heading += args.curvatureRad;
+    headingRad += curvatureRad;
     if (frame === args.devianceFrame) {
-      heading += args.devTurnRad;
+      headingRad += devTurnRad;
     }
 
-    x += args.speedPerFrame * Math.cos(heading);
-    y += args.speedPerFrame * Math.sin(heading);
-
-    // Keep trajectories in a compact arena so canvas scaling remains stable.
-    if (x < -5 || x > 5) {
-      heading = Math.PI - heading;
-      x = clamp(x, -5, 5);
-    }
-    if (y < -3.2 || y > 3.2) {
-      heading = -heading;
-      y = clamp(y, -3.2, 3.2);
-    }
+    x += args.speedPerFrame * Math.cos(headingRad);
+    y += args.speedPerFrame * Math.sin(headingRad);
   }
 
   return points;
+}
+
+function sampleFeasibleSharedOffset(
+  pathA: Point2D[],
+  pathB: Point2D[],
+  rng: () => number,
+): Point2D | null {
+  const aBounds = pathBounds(pathA);
+  const bBounds = pathBounds(pathB);
+
+  const xMin = Math.max(ARENA_MIN_DOT_CENTER - aBounds.minX, ARENA_MIN_DOT_CENTER - bBounds.minX);
+  const xMax = Math.min(ARENA_MAX_DOT_CENTER - aBounds.maxX, ARENA_MAX_DOT_CENTER - bBounds.maxX);
+  const yMin = Math.max(ARENA_MIN_DOT_CENTER - aBounds.minY, ARENA_MIN_DOT_CENTER - bBounds.minY);
+  const yMax = Math.min(ARENA_MAX_DOT_CENTER - aBounds.maxY, ARENA_MAX_DOT_CENTER - bBounds.maxY);
+
+  if (xMax < xMin || yMax < yMin) {
+    return null;
+  }
+
+  return {
+    x: sampleRange(rng, xMin, xMax),
+    y: sampleRange(rng, yMin, yMax),
+  };
+}
+
+function translatePath(path: Point2D[], offsetX: number, offsetY: number): Point2D[] {
+  return path.map((point) => ({
+    x: point.x + offsetX,
+    y: point.y + offsetY,
+  }));
+}
+
+function pathBounds(path: Point2D[]): { minX: number; maxX: number; minY: number; maxY: number } {
+  let minX = Number.POSITIVE_INFINITY;
+  let maxX = Number.NEGATIVE_INFINITY;
+  let minY = Number.POSITIVE_INFINITY;
+  let maxY = Number.NEGATIVE_INFINITY;
+
+  for (const point of path) {
+    minX = Math.min(minX, point.x);
+    maxX = Math.max(maxX, point.x);
+    minY = Math.min(minY, point.y);
+    maxY = Math.max(maxY, point.y);
+  }
+
+  return { minX, maxX, minY, maxY };
+}
+
+function pathWithinBounds(path: Point2D[]): boolean {
+  return path.every(
+    (point) =>
+      point.x >= ARENA_MIN_DOT_CENTER &&
+      point.x <= ARENA_MAX_DOT_CENTER &&
+      point.y >= ARENA_MIN_DOT_CENTER &&
+      point.y <= ARENA_MAX_DOT_CENTER,
+  );
+}
+
+interface BuildPathbandArgs {
+  xyPre: Point2D[];
+  xyPost: Point2D[];
+  devianceFrame: number;
+  holdEndFrame: number;
+  framesPerTrial: number;
+}
+
+function buildPathbandMetadata(args: BuildPathbandArgs): PathbandMetadata {
+  const preXY = buildPathbandPolyline(args.xyPre, args.devianceFrame, args.holdEndFrame, args.framesPerTrial);
+  const postXY = buildPathbandPolyline(args.xyPost, args.devianceFrame, args.holdEndFrame, args.framesPerTrial);
+
+  return {
+    preXY,
+    postXY,
+    widthDeg: PATH_BAND_WIDTH_DEG,
+    halfWidthDeg: PATH_BAND_WIDTH_DEG / 2,
+    preAnchorFrame: clampFrame(args.devianceFrame, args.framesPerTrial),
+    postAnchorFrame: clampFrame(args.devianceFrame, args.framesPerTrial),
+    postDeactivateFrame: args.framesPerTrial,
+    terminalStyle: 'straight',
+  };
+}
+
+function buildPathbandPolyline(
+  xy: Point2D[],
+  startFrame: number,
+  endFrame: number,
+  framesPerTrial: number,
+): Point2D[] {
+  const startIdx = clampFrame(startFrame, framesPerTrial) - 1;
+  let endIdx = clampFrame(endFrame, framesPerTrial) - 1;
+
+  if (endIdx <= startIdx) {
+    endIdx = Math.min(framesPerTrial - 1, startIdx + 1);
+  }
+
+  const slice = xy.slice(startIdx, endIdx + 1);
+  if (slice.length >= 2) {
+    return slice;
+  }
+
+  // Fallback for pathological short ranges.
+  const i0 = Math.max(0, startIdx - 1);
+  const i1 = Math.min(framesPerTrial - 1, i0 + 1);
+  return [xy[i0], xy[i1]];
+}
+
+interface DeriveTimingArgs {
+  trialXY: Point2D[];
+  pathband: PathbandMetadata;
+  devianceFrame: number;
+  fps: number;
+  fallbackOcclusionEndFrame: number;
+  framesPerTrial: number;
+}
+
+function derivePathbandOcclusionTiming(args: DeriveTimingArgs): OcclusionTiming {
+  const invis: boolean[] = [];
+  const fullVisible: boolean[] = [];
+
+  for (let frame = 1; frame <= args.framesPerTrial; frame += 1) {
+    const point = args.trialXY[frame - 1];
+
+    const preActive = frame < args.devianceFrame;
+    const postActive = frame >= args.devianceFrame && frame <= args.pathband.postDeactivateFrame;
+
+    let d = Number.POSITIVE_INFINITY;
+    if (preActive) {
+      d = Math.min(d, distancePointToPolyline(point, args.pathband.preXY));
+    }
+    if (postActive) {
+      d = Math.min(d, distancePointToPolyline(point, args.pathband.postXY));
+    }
+
+    const invisible = d <= args.pathband.halfWidthDeg - DOT_RADIUS_DEG;
+    const fullyVisible = d >= args.pathband.halfWidthDeg + DOT_RADIUS_DEG;
+    invis.push(invisible);
+    fullVisible.push(fullyVisible);
+  }
+
+  const firstPartialIdx = fullVisible.findIndex((v) => !v);
+  const firstInvisibleIdx = invis.findIndex((v) => v);
+  const lastInvisibleIdx = lastIndexWhere(invis, (v) => v);
+
+  const fallbackStart = clampFrame(args.devianceFrame - Math.round(0.25 * args.fps), args.framesPerTrial);
+  const fallbackComplete = clampFrame(args.devianceFrame, args.framesPerTrial);
+  const fallbackEnd = clampFrame(args.fallbackOcclusionEndFrame, args.framesPerTrial);
+
+  const occlusionStartFrame = firstPartialIdx >= 0 ? firstPartialIdx + 1 : fallbackStart;
+  const occlusionCompleteFrame = firstInvisibleIdx >= 0 ? firstInvisibleIdx + 1 : fallbackComplete;
+  const occlusionEndFrame =
+    lastInvisibleIdx >= 0
+      ? Math.max(occlusionCompleteFrame, lastInvisibleIdx + 1)
+      : Math.max(occlusionCompleteFrame, fallbackEnd);
+
+  let occlusionEndCompleteFrame = args.framesPerTrial;
+  for (let i = occlusionEndFrame; i < args.framesPerTrial; i += 1) {
+    if (fullVisible[i]) {
+      occlusionEndCompleteFrame = i + 1;
+      break;
+    }
+  }
+
+  return {
+    occlusionStartFrame: clampFrame(occlusionStartFrame, args.framesPerTrial),
+    occlusionCompleteFrame: clampFrame(occlusionCompleteFrame, args.framesPerTrial),
+    occlusionEndFrame: clampFrame(occlusionEndFrame, args.framesPerTrial),
+    occlusionEndCompleteFrame: clampFrame(occlusionEndCompleteFrame, args.framesPerTrial),
+  };
+}
+
+function distancePointToPolyline(point: Point2D, polyline: Point2D[]): number {
+  if (polyline.length < 2) {
+    return Number.POSITIVE_INFINITY;
+  }
+
+  let minDist = Number.POSITIVE_INFINITY;
+  for (let i = 0; i < polyline.length - 1; i += 1) {
+    const a = polyline[i];
+    const b = polyline[i + 1];
+    minDist = Math.min(minDist, distancePointToSegment(point, a, b));
+  }
+  return minDist;
+}
+
+function distancePointToSegment(p: Point2D, a: Point2D, b: Point2D): number {
+  const abx = b.x - a.x;
+  const aby = b.y - a.y;
+  const apx = p.x - a.x;
+  const apy = p.y - a.y;
+
+  const ab2 = abx * abx + aby * aby;
+  if (ab2 <= 1e-12) {
+    return Math.hypot(apx, apy);
+  }
+
+  const t = clamp((apx * abx + apy * aby) / ab2, 0, 1);
+  const cx = a.x + t * abx;
+  const cy = a.y + t * aby;
+  return Math.hypot(p.x - cx, p.y - cy);
+}
+
+function lastIndexWhere<T>(items: T[], predicate: (item: T) => boolean): number {
+  for (let i = items.length - 1; i >= 0; i -= 1) {
+    if (predicate(items[i])) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+interface MakeSourceTrialArgs {
+  sourceIndex: number;
+  sequenceId: number;
+  conditionCode: number;
+  conditionLabel: ConditionLabel;
+  occlusionEnabled: boolean;
+  xy: Point2D[];
+  timing: OcclusionTiming;
+  pathband: PathbandMetadata;
+}
+
+function makeSourceTrial(args: MakeSourceTrialArgs): SourceTrial {
+  const pathFingerprint = `${args.conditionLabel}|${args.sequenceId}|${args.xy
+    .slice(0, 4)
+    .map((p) => `${p.x.toFixed(4)}:${p.y.toFixed(4)}`)
+    .join('|')}|${args.xy[args.xy.length - 1].x.toFixed(4)}:${args.xy[
+    args.xy.length - 1
+  ].y.toFixed(4)}|${args.pathband.widthDeg.toFixed(4)}`;
+
+  return {
+    sourceIndex: args.sourceIndex,
+    sourceTrialId: `trial_${String(args.sourceIndex).padStart(3, '0')}`,
+    sequenceId: args.sequenceId,
+    conditionCode: args.conditionCode,
+    conditionLabel: args.conditionLabel,
+    occlusionEnabled: args.occlusionEnabled,
+    devianceFrame: args.pathband.preAnchorFrame,
+    occlusionStartFrame: args.timing.occlusionStartFrame,
+    occlusionCompleteFrame: args.timing.occlusionCompleteFrame,
+    occlusionEndFrame: args.timing.occlusionEndFrame,
+    occlusionEndCompleteFrame: args.timing.occlusionEndCompleteFrame,
+    pathbandPreXY: args.pathband.preXY,
+    pathbandPostXY: args.pathband.postXY,
+    pathbandWidthDeg: args.pathband.widthDeg,
+    pathbandHalfWidthDeg: args.pathband.halfWidthDeg,
+    pathbandPreAnchorFrame: args.pathband.preAnchorFrame,
+    pathbandPostAnchorFrame: args.pathband.postAnchorFrame,
+    pathbandPostDeactivateFrame: args.pathband.postDeactivateFrame,
+    pathbandTerminalStyle: args.pathband.terminalStyle,
+    pathId: `path_${fnv1aHash(pathFingerprint)}`,
+    xy: args.xy,
+  };
 }
 
 function sampleRange(rng: () => number, min: number, max: number): number {
@@ -365,6 +679,10 @@ function sampleSignedInWindows(
 
 function toRad(deg: number): number {
   return (deg * Math.PI) / 180;
+}
+
+function toDeg(rad: number): number {
+  return (rad * 180) / Math.PI;
 }
 
 function clamp(value: number, min: number, max: number): number {
@@ -439,9 +757,7 @@ export function findMatchingDeviantForSequence(
   sequenceId: number,
 ): number | null {
   const match = dataset.sourceTrials.find(
-    (trial) =>
-      trial.sequenceId === sequenceId &&
-      trial.conditionLabel === 'occluded_deviant',
+    (trial) => trial.sequenceId === sequenceId && trial.conditionLabel === 'occluded_deviant',
   );
   return match ? match.sourceIndex : null;
 }

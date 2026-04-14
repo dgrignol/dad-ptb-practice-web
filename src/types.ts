@@ -31,11 +31,20 @@ export interface SourceTrial {
   sequenceId: number;
   conditionCode: number;
   conditionLabel: ConditionLabel;
+  occlusionEnabled: boolean;
   devianceFrame: number;
   occlusionStartFrame: number;
   occlusionCompleteFrame: number;
   occlusionEndFrame: number;
   occlusionEndCompleteFrame: number;
+  pathbandPreXY: Point2D[];
+  pathbandPostXY: Point2D[];
+  pathbandWidthDeg: number;
+  pathbandHalfWidthDeg: number;
+  pathbandPreAnchorFrame: number;
+  pathbandPostAnchorFrame: number;
+  pathbandPostDeactivateFrame: number;
+  pathbandTerminalStyle: 'round' | 'straight';
   pathId: string;
   xy: Point2D[];
 }

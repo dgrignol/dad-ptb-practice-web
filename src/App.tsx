@@ -55,8 +55,11 @@ type UiPhase =
 
 const ARENA_X_MIN = -5;
 const ARENA_X_MAX = 5;
-const ARENA_Y_MIN = -3.2;
-const ARENA_Y_MAX = 3.2;
+const ARENA_Y_MIN = -5;
+const ARENA_Y_MAX = 5;
+
+const DOT_WIDTH_DEG = 0.51442;
+const DOT_RADIUS_DEG = DOT_WIDTH_DEG / 2;
 
 function App() {
   const query = useMemo(() => parseQueryOverrides(window.location.search), []);
@@ -734,6 +737,9 @@ function App() {
           Test mode: <code>?testMode=1&amp;participant=999&amp;run1=4&amp;run2=4&amp;autoStart=1</code>
         </p>
         <p>
+          Arena mapping is a square 10x10 deg coordinate space (designed for ~60 cm viewing distance assumptions).
+        </p>
+        <p>
           Key map uses <code>KeyboardEvent.code</code>: YES {`{${RESPONSE_KEYS.yesCodes.join(', ')}}`},
           NO {`{${RESPONSE_KEYS.noCodes.join(', ')}}`}.
         </p>
@@ -757,33 +763,39 @@ interface DrawTrialFrameArgs {
  */
 function drawTrialFrame(args: DrawTrialFrameArgs): void {
   const { context, canvas, source, altSource, plan, runIndex, frameIndex } = args;
+  const frameOneBased = frameIndex + 1;
+  const arenaRect = getArenaRect(canvas);
 
   // Section: background and arena frame.
   context.fillStyle = '#080b12';
   context.fillRect(0, 0, canvas.width, canvas.height);
 
+  context.fillStyle = '#0b1320';
+  context.fillRect(arenaRect.x, arenaRect.y, arenaRect.size, arenaRect.size);
+
   context.strokeStyle = '#1f2937';
   context.lineWidth = 2;
-  context.strokeRect(30, 30, canvas.width - 60, canvas.height - 60);
+  context.strokeRect(arenaRect.x, arenaRect.y, arenaRect.size, arenaRect.size);
 
-  // Section: optional path-band-like occluder visualization for run 2.
-  if (runIndex === 2) {
-    const start = Math.max(0, source.devianceFrame - 1);
-    const end = Math.min(source.xy.length - 1, source.occlusionEndFrame - 1);
+  // Section: render run-2 occluder path-band with PTB-like pre/post activation.
+  if (runIndex === 2 && source.occlusionEnabled) {
+    const drawPre = frameOneBased < source.pathbandPreAnchorFrame;
+    const drawPost =
+      frameOneBased >= source.pathbandPostAnchorFrame &&
+      frameOneBased <= source.pathbandPostDeactivateFrame;
 
-    context.strokeStyle = '#000000';
-    context.lineWidth = 14;
-    context.lineCap = 'round';
-    context.beginPath();
-    for (let i = start; i <= end; i += 1) {
-      const pt = toCanvas(source.xy[i], canvas);
-      if (i === start) {
-        context.moveTo(pt.x, pt.y);
-      } else {
-        context.lineTo(pt.x, pt.y);
-      }
+    if (drawPre) {
+      drawPathbandPolyline(context, canvas, source.pathbandPreXY, source.pathbandWidthDeg, source.pathbandTerminalStyle);
     }
-    context.stroke();
+    if (drawPost) {
+      drawPathbandPolyline(
+        context,
+        canvas,
+        source.pathbandPostXY,
+        source.pathbandWidthDeg,
+        source.pathbandTerminalStyle,
+      );
+    }
   }
 
   // Section: resolve active position and visibility according to catch logic.
@@ -794,8 +806,8 @@ function drawTrialFrame(args: DrawTrialFrameArgs): void {
     if (
       plan.catchDisappearFrame !== null &&
       plan.catchReappearFrame !== null &&
-      frameIndex + 1 >= plan.catchDisappearFrame &&
-      frameIndex + 1 < plan.catchReappearFrame
+      frameOneBased >= plan.catchDisappearFrame &&
+      frameOneBased < plan.catchReappearFrame
     ) {
       visible = false;
     }
@@ -805,16 +817,14 @@ function drawTrialFrame(args: DrawTrialFrameArgs): void {
       plan.catchBranchChangedPath === 1 &&
       altSource &&
       plan.catchReappearFrame !== null &&
-      frameIndex + 1 >= plan.catchReappearFrame
+      frameOneBased >= plan.catchReappearFrame
     ) {
       point = altSource.xy[Math.min(frameIndex, altSource.xy.length - 1)];
     }
   }
 
-  if (runIndex === 2 && plan.catchTypeCode === 2) {
-    if (frameIndex + 1 >= source.occlusionCompleteFrame && frameIndex + 1 <= source.occlusionEndFrame) {
-      visible = false;
-    }
+  if (runIndex === 2 && plan.catchTypeCode === 2 && source.occlusionEnabled) {
+    visible = !isPointFullyOccludedByPathband(source, point, frameOneBased);
   }
 
   // Section: draw dot and fixation.
@@ -842,18 +852,141 @@ function drawTrialFrame(args: DrawTrialFrameArgs): void {
   context.fillText(`Run ${runIndex} | Trial ${plan.executedTrialIndex} | Frame ${frameIndex + 1}`, 36, 22);
 }
 
+/**
+ * Convert one polyline from visual-degree coordinates to canvas coordinates and
+ * render it as an occluder path-band.
+ */
+function drawPathbandPolyline(
+  context: CanvasRenderingContext2D,
+  canvas: HTMLCanvasElement,
+  points: Array<{ x: number; y: number }>,
+  widthDeg: number,
+  terminalStyle: 'round' | 'straight',
+): void {
+  if (points.length < 2) {
+    return;
+  }
+
+  context.strokeStyle = '#050505';
+  context.lineWidth = Math.max(2, degToCanvasDistance(widthDeg, canvas));
+  context.lineCap = terminalStyle === 'round' ? 'round' : 'butt';
+  context.lineJoin = 'round';
+  context.beginPath();
+
+  for (let i = 0; i < points.length; i += 1) {
+    const pt = toCanvas(points[i], canvas);
+    if (i === 0) {
+      context.moveTo(pt.x, pt.y);
+    } else {
+      context.lineTo(pt.x, pt.y);
+    }
+  }
+
+  context.stroke();
+}
+
+/**
+ * Match run-2 full-occlusion visibility criterion used during source timing
+ * derivation: hide the dot only when its center-to-pathband distance implies
+ * fully invisible occupancy.
+ */
+function isPointFullyOccludedByPathband(
+  source: ReturnType<typeof sourceTrialByIndex>,
+  point: { x: number; y: number },
+  frameOneBased: number,
+): boolean {
+  const preActive = frameOneBased < source.pathbandPreAnchorFrame;
+  const postActive =
+    frameOneBased >= source.pathbandPostAnchorFrame &&
+    frameOneBased <= source.pathbandPostDeactivateFrame;
+
+  let minDistance = Number.POSITIVE_INFINITY;
+
+  if (preActive) {
+    minDistance = Math.min(minDistance, distancePointToPolyline(point, source.pathbandPreXY));
+  }
+  if (postActive) {
+    minDistance = Math.min(minDistance, distancePointToPolyline(point, source.pathbandPostXY));
+  }
+
+  // Fallback to precomputed frame bounds if geometry cannot be resolved.
+  if (!Number.isFinite(minDistance)) {
+    return frameOneBased >= source.occlusionCompleteFrame && frameOneBased <= source.occlusionEndFrame;
+  }
+
+  return minDistance <= source.pathbandHalfWidthDeg - DOT_RADIUS_DEG;
+}
+
+function distancePointToPolyline(point: { x: number; y: number }, polyline: Array<{ x: number; y: number }>): number {
+  if (polyline.length < 2) {
+    return Number.POSITIVE_INFINITY;
+  }
+
+  let minDistance = Number.POSITIVE_INFINITY;
+  for (let i = 0; i < polyline.length - 1; i += 1) {
+    const distance = distancePointToSegment(point, polyline[i], polyline[i + 1]);
+    minDistance = Math.min(minDistance, distance);
+  }
+
+  return minDistance;
+}
+
+function distancePointToSegment(
+  point: { x: number; y: number },
+  segA: { x: number; y: number },
+  segB: { x: number; y: number },
+): number {
+  const abX = segB.x - segA.x;
+  const abY = segB.y - segA.y;
+  const apX = point.x - segA.x;
+  const apY = point.y - segA.y;
+
+  const abSq = abX * abX + abY * abY;
+  if (abSq <= 1e-12) {
+    return Math.hypot(apX, apY);
+  }
+
+  const projection = (apX * abX + apY * abY) / abSq;
+  const t = Math.max(0, Math.min(1, projection));
+  const closestX = segA.x + t * abX;
+  const closestY = segA.y + t * abY;
+  return Math.hypot(point.x - closestX, point.y - closestY);
+}
+
+interface ArenaRect {
+  x: number;
+  y: number;
+  size: number;
+}
+
+function getArenaRect(canvas: HTMLCanvasElement): ArenaRect {
+  const inset = 48;
+  const usableWidth = canvas.width - inset * 2;
+  const usableHeight = canvas.height - inset * 2;
+  const size = Math.max(10, Math.min(usableWidth, usableHeight));
+
+  return {
+    x: (canvas.width - size) / 2,
+    y: (canvas.height - size) / 2,
+    size,
+  };
+}
+
+function degToCanvasDistance(distanceDeg: number, canvas: HTMLCanvasElement): number {
+  const arenaRect = getArenaRect(canvas);
+  const degreesAcross = ARENA_X_MAX - ARENA_X_MIN;
+  return (distanceDeg / degreesAcross) * arenaRect.size;
+}
+
 function toCanvas(point: { x: number; y: number }, canvas: HTMLCanvasElement): { x: number; y: number } {
-  const insetX = 48;
-  const insetY = 48;
-  const usableW = canvas.width - insetX * 2;
-  const usableH = canvas.height - insetY * 2;
+  const arenaRect = getArenaRect(canvas);
 
   const nx = (point.x - ARENA_X_MIN) / (ARENA_X_MAX - ARENA_X_MIN);
   const ny = (point.y - ARENA_Y_MIN) / (ARENA_Y_MAX - ARENA_Y_MIN);
 
   return {
-    x: insetX + nx * usableW,
-    y: insetY + ny * usableH,
+    x: arenaRect.x + nx * arenaRect.size,
+    y: arenaRect.y + ny * arenaRect.size,
   };
 }
 

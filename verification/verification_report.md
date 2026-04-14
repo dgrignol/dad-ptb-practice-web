@@ -1,6 +1,6 @@
 # Verification Report
 
-Generated at: 2026-04-14T11:43:55.256Z
+Generated at: 2026-04-14T12:34:31.645Z
 
 ## Check 1: Refresh-aware input generation
 - PASS: 120 Hz and 60 Hz datasets generated deterministically.
@@ -15,4 +15,4 @@ Generated at: 2026-04-14T11:43:55.256Z
 ## Check 3: Save/export and provenance schema
 - PASS: behavior JSON, metadata JSON, metadata CSV generated.
 - Metadata CSV columns include: source_path_id, included_base_slots, excluded_base_slots, source_trial_id, run_index, executed_trial_index
-- Example source path id: path_a06db2d0
+- Example source path id: path_e272514d
