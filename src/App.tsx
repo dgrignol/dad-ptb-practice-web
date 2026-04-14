@@ -741,8 +741,7 @@ function App() {
       <header className="app-header">
         <h1>DAD PTB Practice Web</h1>
         <p>
-          Browser practice clone of PTB flow: run 1 and run 2 catch-only, deterministic shared input,
-          and provenance-ready logging.
+          Practice single moving dot occlusion experiment.
         </p>
       </header>
 
