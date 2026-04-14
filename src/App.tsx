@@ -264,7 +264,7 @@ function App() {
         if (query.testMode) {
           const simulated = simulateSessionFlow(skeleton);
           setSession(simulated.session);
-          setExports(buildExportArtifacts(simulated.session));
+          setExports(buildExportArtifacts(simulated.session, dataset));
           setCurrentRunIndex(2);
           setActivePlan(null);
           setPhase('session_complete');
@@ -357,6 +357,40 @@ function App() {
         rafRef.current = null;
       }
     };
+  }, [activePlan, currentRunIndex, inputDataset, phase]);
+
+  // Section: keep a visible final-frame snapshot while the question prompt is on screen.
+  useEffect(() => {
+    if (phase !== 'question' || !activePlan || !inputDataset) {
+      return;
+    }
+
+    const canvas = canvasRef.current;
+    if (!canvas) {
+      return;
+    }
+
+    const context = canvas.getContext('2d');
+    if (!context) {
+      return;
+    }
+
+    const source = sourceTrialByIndex(inputDataset, activePlan.sourceIndex);
+    const altSource =
+      activePlan.catchAltSourceIndex !== null
+        ? sourceTrialByIndex(inputDataset, activePlan.catchAltSourceIndex)
+        : null;
+
+    drawTrialFrame({
+      context,
+      canvas,
+      source,
+      altSource,
+      plan: activePlan,
+      runIndex: currentRunIndex,
+      frameIndex: Math.max(0, inputDataset.framesPerTrial - 1),
+      forceDotVisible: true,
+    });
   }, [activePlan, currentRunIndex, inputDataset, phase]);
 
   // Section: question phase keyboard/timeout handling.
@@ -520,7 +554,7 @@ function App() {
         );
       } else {
         setSession(feedbackTransition.finalizedSession);
-        setExports(buildExportArtifacts(feedbackTransition.finalizedSession));
+        setExports(buildExportArtifacts(feedbackTransition.finalizedSession, inputDataset));
         setPhase('session_complete');
         setActivePlan(null);
         setStatusText('Practice complete. Results downloaded automatically. You can try again by pressing R.');
@@ -532,7 +566,7 @@ function App() {
     return () => {
       window.clearTimeout(timeoutHandle);
     };
-  }, [feedbackTransition, phase]);
+  }, [feedbackTransition, inputDataset, phase]);
 
   // Section: feedback phase draws one static end-of-trial frame with colored fixation.
   useEffect(() => {
@@ -671,6 +705,20 @@ function App() {
     downloadTextFile(`practice_metadata_${session.sessionId}.csv`, exports.metadataCsv);
   }, [exports, session]);
 
+  const downloadTrajectoryJson = useCallback(() => {
+    if (!session || !exports) {
+      return;
+    }
+    downloadTextFile(`practice_trajectories_${session.sessionId}.json`, exports.trajectoryJson);
+  }, [exports, session]);
+
+  const downloadTrajectoryCsv = useCallback(() => {
+    if (!session || !exports) {
+      return;
+    }
+    downloadTextFile(`practice_trajectories_${session.sessionId}.csv`, exports.trajectoryCsv);
+  }, [exports, session]);
+
   // Section: auto-download all outputs when practice completes.
   useEffect(() => {
     if (phase !== 'session_complete' || !session || !exports || query.testMode) {
@@ -684,6 +732,8 @@ function App() {
     downloadTextFile(`practice_session_${session.sessionId}.json`, exports.behaviorJson);
     downloadTextFile(`practice_metadata_${session.sessionId}.json`, exports.metadataJson);
     downloadTextFile(`practice_metadata_${session.sessionId}.csv`, exports.metadataCsv);
+    downloadTextFile(`practice_trajectories_${session.sessionId}.json`, exports.trajectoryJson);
+    downloadTextFile(`practice_trajectories_${session.sessionId}.csv`, exports.trajectoryCsv);
   }, [exports, phase, query.testMode, session]);
 
   return (
@@ -845,6 +895,12 @@ function App() {
             <button type="button" onClick={downloadMetadataCsv}>
               Download Metadata Log (CSV)
             </button>
+            <button type="button" onClick={downloadTrajectoryJson}>
+              Download Trajectories (JSON)
+            </button>
+            <button type="button" onClick={downloadTrajectoryCsv}>
+              Download Trajectories (CSV)
+            </button>
           </div>
         </section>
       )}
@@ -874,13 +930,24 @@ interface DrawTrialFrameArgs {
   runIndex: 1 | 2;
   frameIndex: number;
   fixationFeedback?: FixationFeedback;
+  forceDotVisible?: boolean;
 }
 
 /**
  * Draw one animation frame for the currently active trial plan.
  */
 function drawTrialFrame(args: DrawTrialFrameArgs): void {
-  const { context, canvas, source, altSource, plan, runIndex, frameIndex, fixationFeedback = 'neutral' } = args;
+  const {
+    context,
+    canvas,
+    source,
+    altSource,
+    plan,
+    runIndex,
+    frameIndex,
+    fixationFeedback = 'neutral',
+    forceDotVisible = false,
+  } = args;
   const frameOneBased = frameIndex + 1;
   const arenaRect = getArenaRect(canvas);
 
@@ -930,6 +997,10 @@ function drawTrialFrame(args: DrawTrialFrameArgs): void {
 
   if (runIndex === 2 && plan.catchTypeCode === 2 && source.occlusionEnabled) {
     visible = !isPointFullyOccludedByPathband(source, point, frameOneBased);
+  }
+
+  if (forceDotVisible) {
+    visible = true;
   }
 
   // Section: draw dot and fixation.

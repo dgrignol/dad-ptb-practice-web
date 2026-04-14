@@ -5,19 +5,28 @@
  *   Build and download session export artifacts:
  *   - one behavioral output file (RT + accuracy),
  *   - one metadata log in JSON,
- *   - one metadata log in CSV.
+ *   - one metadata log in CSV,
+ *   - one trajectory export in JSON/CSV with per-frame x/y and source path ids.
  *
  * Usage example:
  *   const artifacts = buildExportArtifacts(session);
  *   downloadTextFile('practice_session_001.json', artifacts.behaviorJson);
  */
 
-import type { ExportArtifacts, PracticeSessionResult, TrialRuntimeResult } from '../types';
+import type {
+  ExportArtifacts,
+  PracticeSessionResult,
+  SharedInputDataset,
+  TrialRuntimeResult,
+} from '../types';
 
 /**
  * Build output payloads required by practice and downstream analysis.
  */
-export function buildExportArtifacts(session: PracticeSessionResult): ExportArtifacts {
+export function buildExportArtifacts(
+  session: PracticeSessionResult,
+  dataset: SharedInputDataset | null,
+): ExportArtifacts {
   const behaviorPayload = {
     sessionId: session.sessionId,
     participantNumber: session.participantNumber,
@@ -41,10 +50,23 @@ export function buildExportArtifacts(session: PracticeSessionResult): ExportArti
     ...session,
   };
 
+  const trajectoryRows = buildTrajectoryRows(session, dataset);
+
   return {
     behaviorJson: JSON.stringify(behaviorPayload, null, 2),
     metadataJson: JSON.stringify(metadataPayload, null, 2),
     metadataCsv: buildMetadataCsv(session),
+    trajectoryJson: JSON.stringify(
+      {
+        sessionId: session.sessionId,
+        participantNumber: session.participantNumber,
+        inputDatasetId: session.selectedInputDatasetId,
+        trials: trajectoryRows,
+      },
+      null,
+      2,
+    ),
+    trajectoryCsv: buildTrajectoryCsv(trajectoryRows),
   };
 }
 
@@ -143,6 +165,90 @@ function buildMetadataCsv(session: PracticeSessionResult): string {
   });
 
   return [header.join(','), ...rows.map((row) => row.map(csvEscape).join(','))].join('\n');
+}
+
+interface TrajectoryRow {
+  sessionId: string;
+  participantNumber: number;
+  runIndex: 1 | 2;
+  executedTrialIndex: number;
+  sourceTrialId: string;
+  sourceIndex: number;
+  sourcePathId: string;
+  sequenceId: number | null;
+  frameIndex: number;
+  xDeg: number;
+  yDeg: number;
+}
+
+function buildTrajectoryRows(
+  session: PracticeSessionResult,
+  dataset: SharedInputDataset | null,
+): TrajectoryRow[] {
+  if (!dataset) {
+    return [];
+  }
+
+  const rows: TrajectoryRow[] = [];
+
+  for (const trial of session.trials) {
+    const sourceTrial = dataset.sourceTrials.find((source) => source.sourceIndex === trial.sourceIndex);
+    const plan = findPlanForTrial(session, trial);
+    if (!sourceTrial) {
+      continue;
+    }
+
+    for (let i = 0; i < sourceTrial.xy.length; i += 1) {
+      const point = sourceTrial.xy[i];
+      rows.push({
+        sessionId: session.sessionId,
+        participantNumber: session.participantNumber,
+        runIndex: trial.runIndex,
+        executedTrialIndex: trial.executedTrialIndex,
+        sourceTrialId: trial.sourceTrialId,
+        sourceIndex: trial.sourceIndex,
+        sourcePathId: trial.sourcePathId,
+        sequenceId: plan?.sequenceId ?? null,
+        frameIndex: i + 1,
+        xDeg: point.x,
+        yDeg: point.y,
+      });
+    }
+  }
+
+  return rows;
+}
+
+function buildTrajectoryCsv(rows: TrajectoryRow[]): string {
+  const header = [
+    'session_id',
+    'participant_number',
+    'run_index',
+    'executed_trial_index',
+    'source_trial_id',
+    'source_index',
+    'source_path_id',
+    'sequence_id',
+    'frame_index',
+    'x_deg',
+    'y_deg',
+  ];
+
+  const csvRows = rows.map((row) => [
+    row.sessionId,
+    String(row.participantNumber),
+    String(row.runIndex),
+    String(row.executedTrialIndex),
+    row.sourceTrialId,
+    String(row.sourceIndex),
+    row.sourcePathId,
+    toCsvScalar(row.sequenceId),
+    String(row.frameIndex),
+    String(row.xDeg),
+    String(row.yDeg),
+  ]);
+
+  return [header.join(','), ...csvRows.map((row) => row.map(csvEscape).join(','))].join('\n');
 }
 
 function findPlanForTrial(

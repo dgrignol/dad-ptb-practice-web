@@ -187,6 +187,8 @@ export interface ExportArtifacts {
   behaviorJson: string;
   metadataJson: string;
   metadataCsv: string;
+  trajectoryJson: string;
+  trajectoryCsv: string;
 }
 
 export interface RefreshDetectionResult {

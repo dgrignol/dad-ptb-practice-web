@@ -177,6 +177,18 @@ button:disabled {
   color: #cbd5e1;
 }
 
+.question-overlay {
+  background: transparent;
+  pointer-events: none;
+  align-content: start;
+  padding-top: 28px;
+}
+
+.question-overlay h3,
+.question-overlay p {
+  text-shadow: 0 1px 4px rgba(0, 0, 0, 0.9);
+}
+
 .summary-panel {
   display: grid;
   gap: 12px;

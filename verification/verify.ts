@@ -123,10 +123,12 @@ async function run(): Promise<void> {
   reportLines.push('');
 
   // Section: save/export and provenance schema checks.
-  const artifacts = buildExportArtifacts(simulated.session);
+  const artifacts = buildExportArtifacts(simulated.session, dataset60);
   assert(artifacts.behaviorJson.length > 10, 'Behavior output JSON is empty.');
   assert(artifacts.metadataJson.length > 10, 'Metadata JSON is empty.');
   assert(artifacts.metadataCsv.length > 10, 'Metadata CSV is empty.');
+  assert(artifacts.trajectoryJson.length > 10, 'Trajectory JSON is empty.');
+  assert(artifacts.trajectoryCsv.length > 10, 'Trajectory CSV is empty.');
 
   const csvHeader = artifacts.metadataCsv.split('\n', 1)[0] ?? '';
   const requiredColumns = [

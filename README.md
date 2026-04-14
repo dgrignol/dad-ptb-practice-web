@@ -93,6 +93,8 @@ At session end, UI exposes three downloads:
 1. `practice_session_<sessionId>.json` (behavior output, RT + accuracy summary)
 2. `practice_metadata_<sessionId>.json` (full metadata/provenance log)
 3. `practice_metadata_<sessionId>.csv` (metadata/provenance in tabular form)
+4. `practice_trajectories_<sessionId>.json` (per-trial frame-by-frame x/y trajectories)
+5. `practice_trajectories_<sessionId>.csv` (same trajectory payload in tabular format)
 
 ### Behavioral Output (`practice_session_*.json`)
 Contains:
@@ -114,12 +116,22 @@ Includes required provenance fields:
   - `sourcePathId`, `catchAltPathId`, `catchAltSourceIndex`.
 - Practice subsampling provenance:
   - `includedBaseSlots`, `excludedBaseSlots`.
+  - `includedBaseSlots` are 1-based slot positions from the base run order that were kept after practice subsampling.
+  - `excludedBaseSlots` are 1-based slot positions from the base run order that were dropped.
 - Planned/completed tracking:
   - `plannedRunTrials`, `completedRunTrialsAtRecord`,
   - plus run-level planned/completed totals in session object.
 - Catch response outcome:
   - `catchTypeCode`, `catchExpectedResponseCode`,
   - `catchResponseCode`, `catchResponseCorrect`, `catchResponseRtMs`, `catchTimedOut`.
+
+### Trajectory Export Schema (`practice_trajectories_*.json` and CSV)
+Includes one row per frame per executed trial, with direct linkage to behavioral trials:
+- `session_id`, `participant_number`
+- `run_index`, `executed_trial_index`
+- `source_trial_id`, `source_index`, `source_path_id`, `sequence_id`
+- `frame_index`
+- `x_deg`, `y_deg`
 
 ## Verification
 Run verification script:
