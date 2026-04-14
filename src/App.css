@@ -1,0 +1,238 @@
+/*
+ * File: src/App.css
+ *
+ * Purpose:
+ *   Main layout and experiment-stage styling for the browser practice app.
+ *
+ * Usage example:
+ *   Imported by src/App.tsx.
+ */
+
+:root {
+  --bg: #04070d;
+  --panel: #0f172a;
+  --panel-soft: #111827;
+  --text: #e5e7eb;
+  --muted: #9ca3af;
+  --accent: #22d3ee;
+  --accent-2: #34d399;
+  --danger: #f87171;
+  --border: #1f2937;
+}
+
+.app-shell {
+  min-height: 100vh;
+  color: var(--text);
+  background:
+    radial-gradient(circle at 15% 15%, rgba(34, 211, 238, 0.12), transparent 38%),
+    radial-gradient(circle at 85% 30%, rgba(52, 211, 153, 0.1), transparent 42%),
+    linear-gradient(180deg, #030712 0%, #02040a 100%);
+  padding: 20px;
+  display: grid;
+  gap: 16px;
+  font-family: 'IBM Plex Sans', 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+}
+
+.app-header h1 {
+  margin: 0;
+  font-size: clamp(1.3rem, 2.4vw, 1.9rem);
+}
+
+.app-header p {
+  margin: 8px 0 0;
+  color: var(--muted);
+}
+
+.panel {
+  background: linear-gradient(180deg, rgba(17, 24, 39, 0.95), rgba(15, 23, 42, 0.95));
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 14px;
+}
+
+.panel h2 {
+  margin: 0 0 12px;
+  font-size: 1.02rem;
+  letter-spacing: 0.02em;
+}
+
+.info-panel {
+  display: grid;
+  gap: 12px;
+}
+
+.control-grid {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+}
+
+.control-grid label {
+  display: grid;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+input {
+  background: #0b1220;
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 8px;
+  padding: 8px 10px;
+}
+
+input:focus {
+  outline: 2px solid rgba(34, 211, 238, 0.4);
+  outline-offset: 1px;
+}
+
+.button-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+button {
+  background: linear-gradient(180deg, #0ea5e9, #0284c7);
+  border: none;
+  color: #ecfeff;
+  border-radius: 8px;
+  padding: 9px 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+button:hover {
+  filter: brightness(1.06);
+}
+
+button:disabled {
+  background: #334155;
+  color: #cbd5e1;
+  cursor: not-allowed;
+}
+
+.status-text {
+  margin: 0;
+  padding: 9px 10px;
+  border-left: 3px solid var(--accent);
+  background: rgba(2, 132, 199, 0.08);
+  color: #dbeafe;
+}
+
+.meta-grid {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+}
+
+.meta-grid div {
+  display: grid;
+  gap: 2px;
+  background: rgba(15, 23, 42, 0.6);
+  border: 1px solid rgba(31, 41, 55, 0.8);
+  border-radius: 8px;
+  padding: 8px 10px;
+}
+
+.meta-grid strong {
+  font-size: 0.78rem;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.stage-panel {
+  position: relative;
+}
+
+.practice-canvas {
+  width: 100%;
+  max-width: 100%;
+  height: auto;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: #020617;
+}
+
+.overlay {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-content: center;
+  gap: 10px;
+  text-align: center;
+  padding: 20px;
+  background: rgba(2, 6, 23, 0.78);
+}
+
+.overlay h3 {
+  margin: 0;
+  font-size: clamp(1.1rem, 2.4vw, 1.6rem);
+}
+
+.overlay p {
+  margin: 0;
+  color: #cbd5e1;
+}
+
+.summary-panel {
+  display: grid;
+  gap: 12px;
+}
+
+.table-wrap {
+  overflow-x: auto;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.92rem;
+}
+
+th,
+td {
+  padding: 8px;
+  border: 1px solid var(--border);
+  text-align: left;
+}
+
+th {
+  background: #0b1220;
+  color: #cbd5e1;
+  text-transform: uppercase;
+  font-size: 0.73rem;
+  letter-spacing: 0.06em;
+}
+
+.run-counts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  color: #d1fae5;
+}
+
+.app-footer {
+  color: var(--muted);
+  font-size: 0.84rem;
+}
+
+.app-footer code {
+  background: #0b1220;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 2px 5px;
+  color: #bae6fd;
+}
+
+@media (max-width: 900px) {
+  .app-shell {
+    padding: 12px;
+  }
+
+  .panel {
+    padding: 12px;
+  }
+}

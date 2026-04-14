@@ -1,0 +1,24 @@
+/*
+ * File: src/index.css
+ *
+ * Purpose:
+ *   Global reset and typography defaults for the practice web app.
+ */
+
+@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&display=swap');
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  margin: 0;
+  width: 100%;
+  min-height: 100%;
+}
+
+body {
+  background: #02040a;
+}

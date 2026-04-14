@@ -1,0 +1,905 @@
+/**
+ * File: src/App.tsx
+ *
+ * Purpose:
+ *   Browser implementation of PTB practice (run1/run2 catch-only) with
+ *   deterministic shared input generation, refresh-aware fps selection,
+ *   and full provenance logging for later analysis.
+ *
+ * Usage example:
+ *   Development:
+ *     npm run dev
+ *
+ *   Test mode (bypass manual participant input):
+ *     http://localhost:5173/?testMode=1&participant=999&run1=4&run2=4&autoStart=1
+ *
+ * Data flow summary:
+ *   setup -> refresh detect -> input select/generate -> run1 trials ->
+ *   run1->run2 transition -> run2 trials -> summary + export files.
+ */
+
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import './App.css';
+import { DEFAULT_PRACTICE_CONFIG, RESPONSE_KEYS } from './config/practiceConfig';
+import { summarizeSession } from './lib/analytics';
+import { buildExportArtifacts, downloadTextFile } from './lib/exporters';
+import {
+  deriveRunSeed,
+  deriveSessionSeed,
+  getOrCreateSharedInputForFps,
+  sourceTrialByIndex,
+} from './lib/inputGeneration';
+import { createSessionId } from './lib/ids';
+import { classifyCatchResponseKey, isContinueKey, isRepeatKey } from './lib/keymap';
+import { createSessionSkeleton, appendTrialResult, finalizeSession } from './lib/practiceSession';
+import { buildPracticeRunPlan } from './lib/practiceScheduler';
+import { parseQueryOverrides } from './lib/query';
+import { detectRefreshHz, mapRefreshToTargetFps } from './lib/refresh';
+import { simulateSessionFlow } from './lib/simulator';
+import type {
+  ExportArtifacts,
+  PracticeSessionResult,
+  PracticeTrialPlan,
+  SharedInputDataset,
+  TrialRuntimeResult,
+} from './types';
+
+type UiPhase =
+  | 'setup'
+  | 'initializing'
+  | 'trial'
+  | 'question'
+  | 'transition'
+  | 'session_complete'
+  | 'error';
+
+const ARENA_X_MIN = -5;
+const ARENA_X_MAX = 5;
+const ARENA_Y_MIN = -3.2;
+const ARENA_Y_MAX = 3.2;
+
+function App() {
+  const query = useMemo(() => parseQueryOverrides(window.location.search), []);
+
+  // Section: setup controls and participant/session-level state.
+  const [phase, setPhase] = useState<UiPhase>('setup');
+  const [statusText, setStatusText] = useState<string>('Enter participant number to start practice.');
+  const [attemptIndex, setAttemptIndex] = useState<number>(1);
+
+  const [participantInput, setParticipantInput] = useState<string>(
+    query.participantNumber ? String(query.participantNumber) : '',
+  );
+  const [run1CountInput, setRun1CountInput] = useState<string>(
+    query.run1TrialCount ? String(query.run1TrialCount) : String(DEFAULT_PRACTICE_CONFIG.run1TrialCount),
+  );
+  const [run2CountInput, setRun2CountInput] = useState<string>(
+    query.run2TrialCount ? String(query.run2TrialCount) : String(DEFAULT_PRACTICE_CONFIG.run2TrialCount),
+  );
+
+  const [detectedRefreshHz, setDetectedRefreshHz] = useState<number | null>(null);
+  const [refreshSampleCount, setRefreshSampleCount] = useState<number>(0);
+  const [refreshMethod, setRefreshMethod] = useState<'raf_median' | 'override' | null>(null);
+  const [targetInputFps, setTargetInputFps] = useState<number | null>(null);
+  const [inputDataset, setInputDataset] = useState<SharedInputDataset | null>(null);
+  const [inputWasGenerated, setInputWasGenerated] = useState<boolean>(false);
+
+  const [session, setSession] = useState<PracticeSessionResult | null>(null);
+  const [exports, setExports] = useState<ExportArtifacts | null>(null);
+
+  // Section: trial-flow pointers and live trial plan references.
+  const [currentRunIndex, setCurrentRunIndex] = useState<1 | 2>(1);
+  const [currentTrialIndex, setCurrentTrialIndex] = useState<number>(1);
+  const [activePlan, setActivePlan] = useState<PracticeTrialPlan | null>(null);
+  const [questionPromptText, setQuestionPromptText] = useState<string>('');
+
+  // Section: drawing and timing refs used by animation/question logic.
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const rafRef = useRef<number | null>(null);
+  const trialAnimationStartMsRef = useRef<number>(0);
+  const questionStartMsRef = useRef<number>(0);
+  const trialStartIsoRef = useRef<string>('');
+  const trialEndIsoRef = useRef<string>('');
+  const activePlanRef = useRef<PracticeTrialPlan | null>(null);
+
+  const hasSession = session !== null;
+
+  const currentSummaryRows = session?.summary.byRunAndCatch ?? [];
+
+  useEffect(() => {
+    activePlanRef.current = activePlan;
+  }, [activePlan]);
+
+  // Section: auto-start support for safe test mode.
+  useEffect(() => {
+    if (!query.autoStart) {
+      return;
+    }
+    if (phase !== 'setup') {
+      return;
+    }
+    const participantValue = query.participantNumber ?? 999;
+    if (!participantInput) {
+      setParticipantInput(String(participantValue));
+    }
+
+    const timer = window.setTimeout(() => {
+      void initializePracticeSession(participantValue);
+    }, 150);
+
+    return () => window.clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [query.autoStart, phase]);
+
+  /**
+   * Initialize session-level state: refresh detect, input select/generate,
+   * run-plan build, and skeleton metadata allocation.
+   */
+  const initializePracticeSession = useCallback(
+    async (participantOverride?: number) => {
+      try {
+        setPhase('initializing');
+        setStatusText('Detecting refresh rate and preparing shared input...');
+
+        const participantNumber =
+          participantOverride ?? Number.parseInt(participantInput.trim(), 10);
+        if (!Number.isFinite(participantNumber) || participantNumber < 1) {
+          throw new Error('Participant number must be a positive integer.');
+        }
+
+        const run1Count = Number.parseInt(run1CountInput.trim(), 10);
+        const run2Count = Number.parseInt(run2CountInput.trim(), 10);
+        if (!Number.isFinite(run1Count) || run1Count < 1) {
+          throw new Error('Run 1 trial count must be >= 1.');
+        }
+        if (!Number.isFinite(run2Count) || run2Count < 1) {
+          throw new Error('Run 2 trial count must be >= 1.');
+        }
+
+        const refresh = await detectRefreshHz(query.fpsOverride);
+        const targetFps = mapRefreshToTargetFps(refresh.detectedRefreshHz);
+
+        setDetectedRefreshHz(refresh.detectedRefreshHz);
+        setRefreshSampleCount(refresh.sampleCount);
+        setRefreshMethod(refresh.method);
+        setTargetInputFps(targetFps);
+
+        const selection = getOrCreateSharedInputForFps({
+          fps: targetFps,
+          sharedInputSubjectId: DEFAULT_PRACTICE_CONFIG.sharedInputSubjectId,
+          sharedRandomSeed: DEFAULT_PRACTICE_CONFIG.sharedRandomSeed,
+        });
+
+        const dataset = selection.dataset;
+        setInputDataset(dataset);
+        setInputWasGenerated(selection.wasGenerated);
+
+        const run1Max = dataset.schedule.runOrdersBase.run1.length;
+        const run2Max = dataset.schedule.runOrdersBase.run2.length;
+        if (run1Count > run1Max) {
+          throw new Error(`Run 1 trial count ${run1Count} exceeds available ${run1Max}.`);
+        }
+        if (run2Count > run2Max) {
+          throw new Error(`Run 2 trial count ${run2Count} exceeds available ${run2Max}.`);
+        }
+
+        const baseConfig = {
+          ...DEFAULT_PRACTICE_CONFIG,
+          run1TrialCount: run1Count,
+          run2TrialCount: run2Count,
+        };
+
+        const sessionSeed = deriveSessionSeed(DEFAULT_PRACTICE_CONFIG.sharedRandomSeed, attemptIndex);
+
+        const run1Plan = buildPracticeRunPlan({
+          dataset,
+          runIndex: 1,
+          targetTrialCount: run1Count,
+          catchSettings: baseConfig.catchSettings,
+          seed: deriveRunSeed(sessionSeed, 1),
+        });
+
+        const run2Plan = buildPracticeRunPlan({
+          dataset,
+          runIndex: 2,
+          targetTrialCount: run2Count,
+          catchSettings: baseConfig.catchSettings,
+          seed: deriveRunSeed(sessionSeed, 2),
+        });
+
+        const sessionId = createSessionId(participantNumber);
+        const skeleton = createSessionSkeleton({
+          sessionId,
+          participantNumber,
+          startedAtIso: new Date().toISOString(),
+          browserUserAgent: window.navigator.userAgent,
+          detectedRefreshHz: refresh.detectedRefreshHz,
+          refreshMeasurementSamples: refresh.sampleCount,
+          refreshDetectionMethod: refresh.method,
+          targetInputFps: targetFps,
+          selectedInputDatasetId: dataset.datasetId,
+          selectedInputDatasetVersion: dataset.datasetVersion,
+          selectedInputDatasetHash: dataset.datasetHash,
+          config: baseConfig,
+          run1Plan,
+          run2Plan,
+        });
+
+        // In test mode we can bypass manual trial interaction for CI checks.
+        if (query.testMode) {
+          const simulated = simulateSessionFlow(skeleton);
+          setSession(simulated.session);
+          setExports(buildExportArtifacts(simulated.session));
+          setCurrentRunIndex(2);
+          setCurrentTrialIndex(simulated.session.runPlannedVsCompleted.run2Completed);
+          setActivePlan(null);
+          setPhase('session_complete');
+          setStatusText(
+            `Test mode complete: ${simulated.flowEvents.join(' -> ')}`,
+          );
+          return;
+        }
+
+        setSession(skeleton);
+        setExports(null);
+        setCurrentRunIndex(1);
+        setCurrentTrialIndex(1);
+        setStatusText('Run 1 started. Keep fixation and answer catch question quickly and accurately.');
+
+        const firstPlan = skeleton.runPlans.run1[0];
+        if (!firstPlan) {
+          throw new Error('Run 1 plan is empty.');
+        }
+        setActivePlan(firstPlan);
+        setPhase('trial');
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'Unknown initialization error.';
+        setPhase('error');
+        setStatusText(message);
+      }
+    },
+    [attemptIndex, participantInput, query.fpsOverride, query.testMode, run1CountInput, run2CountInput],
+  );
+
+  // Section: trial animation loop for the active trial plan.
+  useEffect(() => {
+    if (phase !== 'trial' || !activePlan || !inputDataset) {
+      return;
+    }
+
+    const canvas = canvasRef.current;
+    if (!canvas) {
+      return;
+    }
+
+    const context = canvas.getContext('2d');
+    if (!context) {
+      return;
+    }
+
+    const source = sourceTrialByIndex(inputDataset, activePlan.sourceIndex);
+    const altSource =
+      activePlan.catchAltSourceIndex !== null
+        ? sourceTrialByIndex(inputDataset, activePlan.catchAltSourceIndex)
+        : null;
+
+    const frameDurationMs = 1000 / inputDataset.fps;
+    const totalFrames = inputDataset.framesPerTrial;
+
+    trialAnimationStartMsRef.current = performance.now();
+    trialStartIsoRef.current = new Date().toISOString();
+
+    const draw = (nowMs: number) => {
+      const elapsedMs = nowMs - trialAnimationStartMsRef.current;
+      const frame = Math.min(totalFrames - 1, Math.floor(elapsedMs / frameDurationMs));
+
+      drawTrialFrame({
+        context,
+        canvas,
+        source,
+        altSource,
+        plan: activePlan,
+        runIndex: currentRunIndex,
+        frameIndex: frame,
+      });
+
+      if (frame >= totalFrames - 1) {
+        trialEndIsoRef.current = new Date().toISOString();
+        setQuestionPromptText(DEFAULT_PRACTICE_CONFIG.catchSettings.catchQuestionText);
+        setPhase('question');
+        return;
+      }
+
+      rafRef.current = window.requestAnimationFrame(draw);
+    };
+
+    rafRef.current = window.requestAnimationFrame(draw);
+
+    return () => {
+      if (rafRef.current !== null) {
+        window.cancelAnimationFrame(rafRef.current);
+        rafRef.current = null;
+      }
+    };
+  }, [activePlan, currentRunIndex, inputDataset, phase]);
+
+  // Section: question phase keyboard/timeout handling.
+  useEffect(() => {
+    if (phase !== 'question' || !activePlan) {
+      return;
+    }
+
+    questionStartMsRef.current = performance.now();
+    let resolved = false;
+
+    const commitResponse = (responseCode: 0 | 1 | 2, timedOut: boolean) => {
+      if (resolved) {
+        return;
+      }
+      resolved = true;
+
+      const plan = activePlanRef.current;
+      if (!plan || !session) {
+        return;
+      }
+
+      const responseLabel: 'none' | 'yes' | 'no' =
+        responseCode === 1 ? 'yes' : responseCode === 2 ? 'no' : 'none';
+      const rtMs = responseCode > 0 ? Math.round(performance.now() - questionStartMsRef.current) : null;
+      const responseCorrect =
+        responseCode > 0 ? (Number(responseCode === plan.catchExpectedResponseCode) as 0 | 1) : null;
+
+      const completedBefore =
+        currentRunIndex === 1
+          ? session.runPlannedVsCompleted.run1Completed
+          : session.runPlannedVsCompleted.run2Completed;
+
+      const trialResult: TrialRuntimeResult = {
+        runIndex: currentRunIndex,
+        executedTrialIndex: plan.executedTrialIndex,
+        sourceIndex: plan.sourceIndex,
+        sourceTrialId: plan.sourceTrialId,
+        sourceConditionLabel: plan.sourceConditionLabel,
+        sourcePathId: plan.sourcePathId,
+        catchTypeCode: plan.catchTypeCode,
+        catchTypeLabel: plan.catchTypeLabel,
+        catchExpectedResponseCode: plan.catchExpectedResponseCode,
+        catchResponseCode: responseCode,
+        catchResponseLabel: responseLabel,
+        catchResponseCorrect: responseCorrect,
+        catchResponseRtMs: rtMs,
+        catchTimedOut: timedOut,
+        catchBranchChangedPath: plan.catchBranchChangedPath,
+        catchDisappearFrame: plan.catchDisappearFrame,
+        catchReappearFrame: plan.catchReappearFrame,
+        catchAltSourceIndex: plan.catchAltSourceIndex,
+        catchAltPathId: plan.catchAltPathId,
+        plannedRunTrials: currentRunIndex === 1 ? session.runPlans.run1.length : session.runPlans.run2.length,
+        completedRunTrialsAtRecord: completedBefore + 1,
+        startedAtIso: trialStartIsoRef.current,
+        endedAtIso: trialEndIsoRef.current,
+      };
+
+      const updated = appendTrialResult(session, trialResult);
+      setSession(updated);
+      setStatusText(
+        timedOut
+          ? 'Too slow. Response timed out.'
+          : responseCorrect === 1
+            ? `Correct (${responseLabel.toUpperCase()}).`
+            : `Incorrect (${responseLabel.toUpperCase()}).`,
+      );
+
+      const runPlans = currentRunIndex === 1 ? updated.runPlans.run1 : updated.runPlans.run2;
+      const nextTrial = plan.executedTrialIndex + 1;
+
+      if (nextTrial <= runPlans.length) {
+        setCurrentTrialIndex(nextTrial);
+        setActivePlan(runPlans[nextTrial - 1]);
+        setPhase('trial');
+        return;
+      }
+
+      if (currentRunIndex === 1) {
+        setPhase('transition');
+        setCurrentRunIndex(2);
+        setCurrentTrialIndex(1);
+        setActivePlan(null);
+        setStatusText(
+          'End of Run 1. Run 2 will start now. Instruction reminder: keep fixation and answer catch question quickly and accurately.',
+        );
+        return;
+      }
+
+      const finalized = finalizeSession(updated, new Date().toISOString());
+      finalized.summary = summarizeSession(finalized.trials);
+      setSession(finalized);
+      setExports(buildExportArtifacts(finalized));
+      setPhase('session_complete');
+      setActivePlan(null);
+      setStatusText('Practice complete. Review summary and export files.');
+    };
+
+    const keyHandler = (event: KeyboardEvent) => {
+      const responseCode = classifyCatchResponseKey(event.code);
+      if (responseCode === 0) {
+        return;
+      }
+      event.preventDefault();
+      commitResponse(responseCode, false);
+    };
+
+    const timeoutMs = DEFAULT_PRACTICE_CONFIG.catchSettings.catchQuestionTimeoutSec * 1000;
+    const timeoutHandle = window.setTimeout(() => {
+      commitResponse(0, true);
+    }, timeoutMs);
+
+    window.addEventListener('keydown', keyHandler);
+
+    if (query.testMode) {
+      const autoHandle = window.setTimeout(() => {
+        // In test mode, respond with expected answer for deterministic checks.
+        const plan = activePlanRef.current;
+        if (plan) {
+          commitResponse(plan.catchExpectedResponseCode, false);
+        }
+      }, 200);
+
+      return () => {
+        window.clearTimeout(autoHandle);
+        window.clearTimeout(timeoutHandle);
+        window.removeEventListener('keydown', keyHandler);
+      };
+    }
+
+    return () => {
+      window.clearTimeout(timeoutHandle);
+      window.removeEventListener('keydown', keyHandler);
+    };
+  }, [activePlan, currentRunIndex, phase, query.testMode, session]);
+
+  // Section: transition gate between run 1 and run 2.
+  useEffect(() => {
+    if (phase !== 'transition') {
+      return;
+    }
+
+    const startRun2 = () => {
+      if (!session) {
+        return;
+      }
+      const firstRun2Plan = session.runPlans.run2[0];
+      if (!firstRun2Plan) {
+        setPhase('error');
+        setStatusText('Run 2 plan is empty.');
+        return;
+      }
+      setCurrentRunIndex(2);
+      setCurrentTrialIndex(1);
+      setActivePlan(firstRun2Plan);
+      setPhase('trial');
+      setStatusText('Run 2 started.');
+    };
+
+    const keyHandler = (event: KeyboardEvent) => {
+      if (!isContinueKey(event.code)) {
+        return;
+      }
+      event.preventDefault();
+      startRun2();
+    };
+
+    window.addEventListener('keydown', keyHandler);
+
+    if (query.testMode) {
+      const autoHandle = window.setTimeout(() => {
+        startRun2();
+      }, 150);
+      return () => {
+        window.clearTimeout(autoHandle);
+        window.removeEventListener('keydown', keyHandler);
+      };
+    }
+
+    return () => {
+      window.removeEventListener('keydown', keyHandler);
+    };
+  }, [phase, query.testMode, session]);
+
+  // Section: keyboard shortcut for repeat on completion.
+  useEffect(() => {
+    if (phase !== 'session_complete') {
+      return;
+    }
+
+    const keyHandler = (event: KeyboardEvent) => {
+      if (!isRepeatKey(event.code)) {
+        return;
+      }
+      event.preventDefault();
+      repeatPractice();
+    };
+
+    window.addEventListener('keydown', keyHandler);
+    return () => window.removeEventListener('keydown', keyHandler);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [phase]);
+
+  /**
+   * Repeat practice with the same controls but new deterministic attempt seed.
+   */
+  const repeatPractice = useCallback(() => {
+    setAttemptIndex((prev) => prev + 1);
+    setSession(null);
+    setExports(null);
+    setActivePlan(null);
+    setCurrentRunIndex(1);
+    setCurrentTrialIndex(1);
+    setPhase('setup');
+    setStatusText('Ready for a new practice attempt.');
+  }, []);
+
+  const downloadBehavior = useCallback(() => {
+    if (!session || !exports) {
+      return;
+    }
+    downloadTextFile(`practice_session_${session.sessionId}.json`, exports.behaviorJson);
+  }, [exports, session]);
+
+  const downloadMetadataJson = useCallback(() => {
+    if (!session || !exports) {
+      return;
+    }
+    downloadTextFile(`practice_metadata_${session.sessionId}.json`, exports.metadataJson);
+  }, [exports, session]);
+
+  const downloadMetadataCsv = useCallback(() => {
+    if (!session || !exports) {
+      return;
+    }
+    downloadTextFile(`practice_metadata_${session.sessionId}.csv`, exports.metadataCsv);
+  }, [exports, session]);
+
+  return (
+    <div className="app-shell">
+      <header className="app-header">
+        <h1>DAD PTB Practice Web</h1>
+        <p>
+          Browser practice clone of PTB flow: run 1 and run 2 catch-only, deterministic shared input,
+          and provenance-ready logging.
+        </p>
+      </header>
+
+      <section className="panel info-panel">
+        <h2>Session Controls</h2>
+        <div className="control-grid">
+          <label>
+            Participant Number
+            <input
+              type="number"
+              min={1}
+              value={participantInput}
+              onChange={(e) => setParticipantInput(e.target.value)}
+              disabled={phase !== 'setup' && phase !== 'error'}
+            />
+          </label>
+          <label>
+            Run 1 Trials
+            <input
+              type="number"
+              min={1}
+              value={run1CountInput}
+              onChange={(e) => setRun1CountInput(e.target.value)}
+              disabled={phase !== 'setup' && phase !== 'error'}
+            />
+          </label>
+          <label>
+            Run 2 Trials
+            <input
+              type="number"
+              min={1}
+              value={run2CountInput}
+              onChange={(e) => setRun2CountInput(e.target.value)}
+              disabled={phase !== 'setup' && phase !== 'error'}
+            />
+          </label>
+        </div>
+
+        <div className="button-row">
+          <button
+            type="button"
+            onClick={() => {
+              void initializePracticeSession();
+            }}
+            disabled={phase === 'initializing' || phase === 'trial' || phase === 'question'}
+          >
+            {phase === 'initializing' ? 'Preparing...' : 'Start Practice'}
+          </button>
+
+          {phase === 'session_complete' && (
+            <button type="button" onClick={repeatPractice}>
+              Repeat Practice (R or 8)
+            </button>
+          )}
+        </div>
+
+        <p className="status-text">{statusText}</p>
+
+        <div className="meta-grid">
+          <div>
+            <strong>Attempt</strong>
+            <span>{attemptIndex}</span>
+          </div>
+          <div>
+            <strong>Detected Refresh</strong>
+            <span>{detectedRefreshHz ? `${detectedRefreshHz} Hz` : '-'}</span>
+          </div>
+          <div>
+            <strong>Refresh Samples</strong>
+            <span>{refreshSampleCount || '-'}</span>
+          </div>
+          <div>
+            <strong>Refresh Method</strong>
+            <span>{refreshMethod ?? '-'}</span>
+          </div>
+          <div>
+            <strong>Target Input FPS</strong>
+            <span>{targetInputFps ?? '-'}</span>
+          </div>
+          <div>
+            <strong>Input Source</strong>
+            <span>
+              {inputDataset
+                ? `${inputDataset.datasetId} (${inputWasGenerated ? 'generated now' : 'cached'})`
+                : '-'}
+            </span>
+          </div>
+          <div>
+            <strong>Current Run/Trial</strong>
+            <span>
+              {hasSession ? `Run ${currentRunIndex}, Trial ${currentTrialIndex}` : '-'}
+            </span>
+          </div>
+        </div>
+      </section>
+
+      <section className="panel stage-panel">
+        <h2>Practice Stage</h2>
+        <canvas ref={canvasRef} width={900} height={420} className="practice-canvas" />
+
+        {phase === 'question' && (
+          <div className="overlay question-overlay">
+            <h3>{questionPromptText}</h3>
+            <p>
+              NO: Left Arrow / 1 / N | YES: Right Arrow / 8 / Y
+            </p>
+          </div>
+        )}
+
+        {phase === 'transition' && (
+          <div className="overlay transition-overlay">
+            <h3>End of Run 1</h3>
+            <p>Run 2 will now start.</p>
+            <p>Instruction reminder: keep central fixation and answer quickly/accurately.</p>
+            <p>Press 1 / 8 / Space / Enter or click below.</p>
+            <button
+              type="button"
+              onClick={() => {
+                if (session?.runPlans.run2[0]) {
+                  setCurrentRunIndex(2);
+                  setCurrentTrialIndex(1);
+                  setActivePlan(session.runPlans.run2[0]);
+                  setPhase('trial');
+                  setStatusText('Run 2 started.');
+                }
+              }}
+            >
+              Start Run 2
+            </button>
+          </div>
+        )}
+      </section>
+
+      {phase === 'session_complete' && session && exports && (
+        <section className="panel summary-panel">
+          <h2>Summary by Catch Type</h2>
+          <SummaryTable rows={currentSummaryRows} />
+
+          <div className="run-counts">
+            <div>
+              <strong>Run 1 planned/completed:</strong>{' '}
+              {session.runPlannedVsCompleted.run1Planned}/{session.runPlannedVsCompleted.run1Completed}
+            </div>
+            <div>
+              <strong>Run 2 planned/completed:</strong>{' '}
+              {session.runPlannedVsCompleted.run2Planned}/{session.runPlannedVsCompleted.run2Completed}
+            </div>
+          </div>
+
+          <div className="button-row">
+            <button type="button" onClick={downloadBehavior}>
+              Download Behavior Output (JSON)
+            </button>
+            <button type="button" onClick={downloadMetadataJson}>
+              Download Metadata Log (JSON)
+            </button>
+            <button type="button" onClick={downloadMetadataCsv}>
+              Download Metadata Log (CSV)
+            </button>
+          </div>
+        </section>
+      )}
+
+      <footer className="app-footer">
+        <p>
+          Test mode: <code>?testMode=1&amp;participant=999&amp;run1=4&amp;run2=4&amp;autoStart=1</code>
+        </p>
+        <p>
+          Key map uses <code>KeyboardEvent.code</code>: YES {`{${RESPONSE_KEYS.yesCodes.join(', ')}}`},
+          NO {`{${RESPONSE_KEYS.noCodes.join(', ')}}`}.
+        </p>
+      </footer>
+    </div>
+  );
+}
+
+interface DrawTrialFrameArgs {
+  context: CanvasRenderingContext2D;
+  canvas: HTMLCanvasElement;
+  source: ReturnType<typeof sourceTrialByIndex>;
+  altSource: ReturnType<typeof sourceTrialByIndex> | null;
+  plan: PracticeTrialPlan;
+  runIndex: 1 | 2;
+  frameIndex: number;
+}
+
+/**
+ * Draw one animation frame for the currently active trial plan.
+ */
+function drawTrialFrame(args: DrawTrialFrameArgs): void {
+  const { context, canvas, source, altSource, plan, runIndex, frameIndex } = args;
+
+  // Section: background and arena frame.
+  context.fillStyle = '#080b12';
+  context.fillRect(0, 0, canvas.width, canvas.height);
+
+  context.strokeStyle = '#1f2937';
+  context.lineWidth = 2;
+  context.strokeRect(30, 30, canvas.width - 60, canvas.height - 60);
+
+  // Section: optional path-band-like occluder visualization for run 2.
+  if (runIndex === 2) {
+    const start = Math.max(0, source.devianceFrame - 1);
+    const end = Math.min(source.xy.length - 1, source.occlusionEndFrame - 1);
+
+    context.strokeStyle = '#000000';
+    context.lineWidth = 14;
+    context.lineCap = 'round';
+    context.beginPath();
+    for (let i = start; i <= end; i += 1) {
+      const pt = toCanvas(source.xy[i], canvas);
+      if (i === start) {
+        context.moveTo(pt.x, pt.y);
+      } else {
+        context.lineTo(pt.x, pt.y);
+      }
+    }
+    context.stroke();
+  }
+
+  // Section: resolve active position and visibility according to catch logic.
+  let point = source.xy[Math.min(frameIndex, source.xy.length - 1)];
+  let visible = true;
+
+  if (runIndex === 1 && plan.catchTypeCode === 1) {
+    if (
+      plan.catchDisappearFrame !== null &&
+      plan.catchReappearFrame !== null &&
+      frameIndex + 1 >= plan.catchDisappearFrame &&
+      frameIndex + 1 < plan.catchReappearFrame
+    ) {
+      visible = false;
+    }
+
+    if (
+      visible &&
+      plan.catchBranchChangedPath === 1 &&
+      altSource &&
+      plan.catchReappearFrame !== null &&
+      frameIndex + 1 >= plan.catchReappearFrame
+    ) {
+      point = altSource.xy[Math.min(frameIndex, altSource.xy.length - 1)];
+    }
+  }
+
+  if (runIndex === 2 && plan.catchTypeCode === 2) {
+    if (frameIndex + 1 >= source.occlusionCompleteFrame && frameIndex + 1 <= source.occlusionEndFrame) {
+      visible = false;
+    }
+  }
+
+  // Section: draw dot and fixation.
+  if (visible) {
+    const px = toCanvas(point, canvas);
+    context.fillStyle = runIndex === 1 ? '#38bdf8' : '#22c55e';
+    context.beginPath();
+    context.arc(px.x, px.y, 8, 0, Math.PI * 2);
+    context.fill();
+  }
+
+  const cx = canvas.width / 2;
+  const cy = canvas.height / 2;
+  context.strokeStyle = '#e5e7eb';
+  context.lineWidth = 2;
+  context.beginPath();
+  context.moveTo(cx - 10, cy);
+  context.lineTo(cx + 10, cy);
+  context.moveTo(cx, cy - 10);
+  context.lineTo(cx, cy + 10);
+  context.stroke();
+
+  context.fillStyle = '#9ca3af';
+  context.font = '13px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace';
+  context.fillText(`Run ${runIndex} | Trial ${plan.executedTrialIndex} | Frame ${frameIndex + 1}`, 36, 22);
+}
+
+function toCanvas(point: { x: number; y: number }, canvas: HTMLCanvasElement): { x: number; y: number } {
+  const insetX = 48;
+  const insetY = 48;
+  const usableW = canvas.width - insetX * 2;
+  const usableH = canvas.height - insetY * 2;
+
+  const nx = (point.x - ARENA_X_MIN) / (ARENA_X_MAX - ARENA_X_MIN);
+  const ny = (point.y - ARENA_Y_MIN) / (ARENA_Y_MAX - ARENA_Y_MIN);
+
+  return {
+    x: insetX + nx * usableW,
+    y: insetY + ny * usableH,
+  };
+}
+
+interface SummaryTableProps {
+  rows: PracticeSessionResult['summary']['byRunAndCatch'];
+}
+
+function SummaryTable({ rows }: SummaryTableProps) {
+  if (rows.length === 0) {
+    return <p>No summary rows available.</p>;
+  }
+
+  return (
+    <div className="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Run</th>
+            <th>Catch Type</th>
+            <th>Correct/Scored</th>
+            <th>Accuracy %</th>
+            <th>Answered</th>
+            <th>Timeouts</th>
+            <th>Mean RT (ms)</th>
+            <th>Median RT (ms)</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((row) => (
+            <tr key={`${row.runIndex}-${row.catchTypeCode}`}>
+              <td>{row.runIndex}</td>
+              <td>{row.catchTypeLabel}</td>
+              <td>
+                {row.nCorrect}/{row.nScored}
+              </td>
+              <td>{row.accuracyPct !== null ? row.accuracyPct.toFixed(1) : '-'}</td>
+              <td>{row.nAnswered}</td>
+              <td>{row.nTimedOut}</td>
+              <td>{row.meanRtMs !== null ? row.meanRtMs.toFixed(1) : '-'}</td>
+              <td>{row.medianRtMs !== null ? row.medianRtMs.toFixed(1) : '-'}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+export default App;
