@@ -58,7 +58,6 @@ type FixationFeedback = 'neutral' | 'correct' | 'incorrect';
 type FeedbackTransition =
   | {
       kind: 'next_trial';
-      nextTrialIndex: number;
       nextPlan: PracticeTrialPlan;
     }
   | {
@@ -96,19 +95,13 @@ function App() {
     query.run2TrialCount ? String(query.run2TrialCount) : String(DEFAULT_PRACTICE_CONFIG.run2TrialCount),
   );
 
-  const [detectedRefreshHz, setDetectedRefreshHz] = useState<number | null>(null);
-  const [refreshSampleCount, setRefreshSampleCount] = useState<number>(0);
-  const [refreshMethod, setRefreshMethod] = useState<'raf_median' | 'override' | null>(null);
-  const [targetInputFps, setTargetInputFps] = useState<number | null>(null);
   const [inputDataset, setInputDataset] = useState<SharedInputDataset | null>(null);
-  const [inputWasGenerated, setInputWasGenerated] = useState<boolean>(false);
 
   const [session, setSession] = useState<PracticeSessionResult | null>(null);
   const [exports, setExports] = useState<ExportArtifacts | null>(null);
 
   // Section: trial-flow pointers and live trial plan references.
   const [currentRunIndex, setCurrentRunIndex] = useState<1 | 2>(1);
-  const [currentTrialIndex, setCurrentTrialIndex] = useState<number>(1);
   const [activePlan, setActivePlan] = useState<PracticeTrialPlan | null>(null);
   const [questionPromptText, setQuestionPromptText] = useState<string>('');
   const [fixationFeedback, setFixationFeedback] = useState<FixationFeedback>('neutral');
@@ -122,10 +115,37 @@ function App() {
   const trialStartIsoRef = useRef<string>('');
   const trialEndIsoRef = useRef<string>('');
   const activePlanRef = useRef<PracticeTrialPlan | null>(null);
-
-  const hasSession = session !== null;
+  const autoDownloadedSessionIdRef = useRef<string | null>(null);
 
   const currentSummaryRows = session?.summary.byRunAndCatch ?? [];
+  const overallSummary = useMemo(() => {
+    if (!session) {
+      return null;
+    }
+
+    const scored = session.trials.filter((trial) => trial.catchResponseCorrect !== null);
+    const rtValues = session.trials
+      .map((trial) => trial.catchResponseRtMs)
+      .filter((value): value is number => value !== null)
+      .sort((a, b) => a - b);
+
+    const nScored = scored.length;
+    const nCorrect = scored.filter((trial) => trial.catchResponseCorrect === 1).length;
+    const accuracyPct = nScored > 0 ? (nCorrect / nScored) * 100 : null;
+    const meanRtMs =
+      rtValues.length > 0 ? rtValues.reduce((acc, value) => acc + value, 0) / rtValues.length : null;
+    const medianRtMs =
+      rtValues.length > 0 ? rtValues[Math.floor((rtValues.length - 1) / 2)] : null;
+
+    return {
+      nTrials: session.trials.length,
+      nScored,
+      nCorrect,
+      accuracyPct,
+      meanRtMs,
+      medianRtMs,
+    };
+  }, [session]);
 
   useEffect(() => {
     activePlanRef.current = activePlan;
@@ -180,11 +200,6 @@ function App() {
         const refresh = await detectRefreshHz(query.fpsOverride);
         const targetFps = mapRefreshToTargetFps(refresh.detectedRefreshHz);
 
-        setDetectedRefreshHz(refresh.detectedRefreshHz);
-        setRefreshSampleCount(refresh.sampleCount);
-        setRefreshMethod(refresh.method);
-        setTargetInputFps(targetFps);
-
         const selection = getOrCreateSharedInputForFps({
           fps: targetFps,
           sharedInputSubjectId: DEFAULT_PRACTICE_CONFIG.sharedInputSubjectId,
@@ -193,7 +208,6 @@ function App() {
 
         const dataset = selection.dataset;
         setInputDataset(dataset);
-        setInputWasGenerated(selection.wasGenerated);
 
         const run1Max = dataset.schedule.runOrdersBase.run1.length;
         const run2Max = dataset.schedule.runOrdersBase.run2.length;
@@ -252,7 +266,6 @@ function App() {
           setSession(simulated.session);
           setExports(buildExportArtifacts(simulated.session));
           setCurrentRunIndex(2);
-          setCurrentTrialIndex(simulated.session.runPlannedVsCompleted.run2Completed);
           setActivePlan(null);
           setPhase('session_complete');
           setStatusText(
@@ -264,9 +277,9 @@ function App() {
         setSession(skeleton);
         setExports(null);
         setCurrentRunIndex(1);
-        setCurrentTrialIndex(1);
         setFixationFeedback('neutral');
         setFeedbackTransition(null);
+        autoDownloadedSessionIdRef.current = null;
         setStatusText('Run 1 started. Keep fixation and answer catch question quickly and accurately.');
 
         const firstPlan = skeleton.runPlans.run1[0];
@@ -428,7 +441,6 @@ function App() {
         }
         setFeedbackTransition({
           kind: 'next_trial',
-          nextTrialIndex: nextTrial,
           nextPlan,
         });
         return;
@@ -497,13 +509,11 @@ function App() {
       setFixationFeedback('neutral');
 
       if (feedbackTransition.kind === 'next_trial') {
-        setCurrentTrialIndex(feedbackTransition.nextTrialIndex);
         setActivePlan(feedbackTransition.nextPlan);
         setPhase('trial');
       } else if (feedbackTransition.kind === 'to_transition') {
         setPhase('transition');
         setCurrentRunIndex(2);
-        setCurrentTrialIndex(1);
         setActivePlan(null);
         setStatusText(
           'End of Run 1. Run 2 will start now. Instruction reminder: keep fixation and answer catch question quickly and accurately.',
@@ -513,7 +523,7 @@ function App() {
         setExports(buildExportArtifacts(feedbackTransition.finalizedSession));
         setPhase('session_complete');
         setActivePlan(null);
-        setStatusText('Practice complete. Review summary and export files.');
+        setStatusText('Practice complete. Results downloaded automatically. You can try again by pressing R.');
       }
 
       setFeedbackTransition(null);
@@ -575,7 +585,6 @@ function App() {
         return;
       }
       setCurrentRunIndex(2);
-      setCurrentTrialIndex(1);
       setActivePlan(firstRun2Plan);
       setPhase('trial');
       setStatusText('Run 2 started.');
@@ -634,9 +643,9 @@ function App() {
     setExports(null);
     setActivePlan(null);
     setCurrentRunIndex(1);
-    setCurrentTrialIndex(1);
     setFixationFeedback('neutral');
     setFeedbackTransition(null);
+    autoDownloadedSessionIdRef.current = null;
     setPhase('setup');
     setStatusText('Ready for a new practice attempt.');
   }, []);
@@ -661,6 +670,21 @@ function App() {
     }
     downloadTextFile(`practice_metadata_${session.sessionId}.csv`, exports.metadataCsv);
   }, [exports, session]);
+
+  // Section: auto-download all outputs when practice completes.
+  useEffect(() => {
+    if (phase !== 'session_complete' || !session || !exports || query.testMode) {
+      return;
+    }
+    if (autoDownloadedSessionIdRef.current === session.sessionId) {
+      return;
+    }
+
+    autoDownloadedSessionIdRef.current = session.sessionId;
+    downloadTextFile(`practice_session_${session.sessionId}.json`, exports.behaviorJson);
+    downloadTextFile(`practice_metadata_${session.sessionId}.json`, exports.metadataJson);
+    downloadTextFile(`practice_metadata_${session.sessionId}.csv`, exports.metadataCsv);
+  }, [exports, phase, query.testMode, session]);
 
   return (
     <div className="app-shell">
@@ -725,49 +749,12 @@ function App() {
 
           {phase === 'session_complete' && (
             <button type="button" onClick={repeatPractice}>
-              Repeat Practice (R or 8)
+              Repeat Practice (R)
             </button>
           )}
         </div>
 
         <p className="status-text">{statusText}</p>
-
-        <div className="meta-grid">
-          <div>
-            <strong>Attempt</strong>
-            <span>{attemptIndex}</span>
-          </div>
-          <div>
-            <strong>Detected Refresh</strong>
-            <span>{detectedRefreshHz ? `${detectedRefreshHz} Hz` : '-'}</span>
-          </div>
-          <div>
-            <strong>Refresh Samples</strong>
-            <span>{refreshSampleCount || '-'}</span>
-          </div>
-          <div>
-            <strong>Refresh Method</strong>
-            <span>{refreshMethod ?? '-'}</span>
-          </div>
-          <div>
-            <strong>Target Input FPS</strong>
-            <span>{targetInputFps ?? '-'}</span>
-          </div>
-          <div>
-            <strong>Input Source</strong>
-            <span>
-              {inputDataset
-                ? `${inputDataset.datasetId} (${inputWasGenerated ? 'generated now' : 'cached'})`
-                : '-'}
-            </span>
-          </div>
-          <div>
-            <strong>Current Run/Trial</strong>
-            <span>
-              {hasSession ? `Run ${currentRunIndex}, Trial ${currentTrialIndex}` : '-'}
-            </span>
-          </div>
-        </div>
       </section>
 
       <section className="panel stage-panel">
@@ -794,7 +781,6 @@ function App() {
               onClick={() => {
                 if (session?.runPlans.run2[0]) {
                   setCurrentRunIndex(2);
-                  setCurrentTrialIndex(1);
                   setActivePlan(session.runPlans.run2[0]);
                   setPhase('trial');
                   setStatusText('Run 2 started.');
@@ -809,7 +795,30 @@ function App() {
 
       {phase === 'session_complete' && session && exports && (
         <section className="panel summary-panel">
-          <h2>Summary by Catch Type</h2>
+          <h2>Practice Complete</h2>
+          <p className="end-message">You can try again by pressing R.</p>
+
+          {overallSummary && (
+            <div className="run-counts">
+              <div>
+                <strong>Accuracy:</strong>{' '}
+                {overallSummary.accuracyPct !== null ? `${overallSummary.accuracyPct.toFixed(1)}%` : '-'}
+              </div>
+              <div>
+                <strong>Mean RT:</strong>{' '}
+                {overallSummary.meanRtMs !== null ? `${overallSummary.meanRtMs.toFixed(1)} ms` : '-'}
+              </div>
+              <div>
+                <strong>Median RT:</strong>{' '}
+                {overallSummary.medianRtMs !== null ? `${overallSummary.medianRtMs.toFixed(1)} ms` : '-'}
+              </div>
+              <div>
+                <strong>Correct/Scored:</strong> {overallSummary.nCorrect}/{overallSummary.nScored}
+              </div>
+            </div>
+          )}
+
+          <h3>Summary by Catch Type</h3>
           <SummaryTable rows={currentSummaryRows} />
 
           <div className="run-counts">
@@ -822,6 +831,9 @@ function App() {
               {session.runPlannedVsCompleted.run2Planned}/{session.runPlannedVsCompleted.run2Completed}
             </div>
           </div>
+
+          <h3>Single-Trial RT and Correct</h3>
+          <SingleTrialResultsTable trials={session.trials} />
 
           <div className="button-row">
             <button type="button" onClick={downloadBehavior}>
@@ -876,7 +888,7 @@ function drawTrialFrame(args: DrawTrialFrameArgs): void {
   context.fillStyle = '#080b12';
   context.fillRect(0, 0, canvas.width, canvas.height);
 
-  context.fillStyle = '#0b1320';
+  context.fillStyle = '#000000';
   context.fillRect(arenaRect.x, arenaRect.y, arenaRect.size, arenaRect.size);
 
   context.strokeStyle = '#1f2937';
@@ -969,7 +981,7 @@ function drawPathbandPolyline(
     return;
   }
 
-  context.strokeStyle = '#050505';
+  context.strokeStyle = '#000000';
   context.lineWidth = Math.max(2, degToCanvasDistance(widthDeg, canvas));
   context.lineCap = terminalStyle === 'round' ? 'round' : 'butt';
   context.lineJoin = 'round';
@@ -1129,6 +1141,41 @@ function SummaryTable({ rows }: SummaryTableProps) {
               <td>{row.nTimedOut}</td>
               <td>{row.meanRtMs !== null ? row.meanRtMs.toFixed(1) : '-'}</td>
               <td>{row.medianRtMs !== null ? row.medianRtMs.toFixed(1) : '-'}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+interface SingleTrialResultsTableProps {
+  trials: PracticeSessionResult['trials'];
+}
+
+function SingleTrialResultsTable({ trials }: SingleTrialResultsTableProps) {
+  if (trials.length === 0) {
+    return <p>No trial results available.</p>;
+  }
+
+  return (
+    <div className="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Run</th>
+            <th>Trial</th>
+            <th>RT (ms)</th>
+            <th>Correct</th>
+          </tr>
+        </thead>
+        <tbody>
+          {trials.map((trial) => (
+            <tr key={`${trial.runIndex}-${trial.executedTrialIndex}`}>
+              <td>{trial.runIndex}</td>
+              <td>{trial.executedTrialIndex}</td>
+              <td>{trial.catchResponseRtMs ?? '-'}</td>
+              <td>{trial.catchResponseCorrect === null ? '-' : trial.catchResponseCorrect}</td>
             </tr>
           ))}
         </tbody>
