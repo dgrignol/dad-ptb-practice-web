@@ -55,6 +55,19 @@ type UiPhase =
   | 'error';
 
 type FixationFeedback = 'neutral' | 'correct' | 'incorrect';
+type FeedbackTransition =
+  | {
+      kind: 'next_trial';
+      nextTrialIndex: number;
+      nextPlan: PracticeTrialPlan;
+    }
+  | {
+      kind: 'to_transition';
+    }
+  | {
+      kind: 'to_complete';
+      finalizedSession: PracticeSessionResult;
+    };
 
 const ARENA_X_MIN = -5;
 const ARENA_X_MAX = 5;
@@ -99,6 +112,7 @@ function App() {
   const [activePlan, setActivePlan] = useState<PracticeTrialPlan | null>(null);
   const [questionPromptText, setQuestionPromptText] = useState<string>('');
   const [fixationFeedback, setFixationFeedback] = useState<FixationFeedback>('neutral');
+  const [feedbackTransition, setFeedbackTransition] = useState<FeedbackTransition | null>(null);
 
   // Section: drawing and timing refs used by animation/question logic.
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -252,6 +266,7 @@ function App() {
         setCurrentRunIndex(1);
         setCurrentTrialIndex(1);
         setFixationFeedback('neutral');
+        setFeedbackTransition(null);
         setStatusText('Run 1 started. Keep fixation and answer catch question quickly and accurately.');
 
         const firstPlan = skeleton.runPlans.run1[0];
@@ -339,7 +354,6 @@ function App() {
 
     questionStartMsRef.current = performance.now();
     let resolved = false;
-    let feedbackHandle: number | null = null;
 
     const commitResponse = (responseCode: 0 | 1 | 2, timedOut: boolean) => {
       if (resolved) {
@@ -406,39 +420,33 @@ function App() {
       const nextTrial = plan.executedTrialIndex + 1;
 
       if (nextTrial <= runPlans.length) {
-        feedbackHandle = window.setTimeout(() => {
-          setFixationFeedback('neutral');
-          setCurrentTrialIndex(nextTrial);
-          setActivePlan(runPlans[nextTrial - 1]);
-          setPhase('trial');
-        }, FEEDBACK_DURATION_MS);
+        const nextPlan = runPlans[nextTrial - 1];
+        if (!nextPlan) {
+          setPhase('error');
+          setStatusText('Could not load next trial plan.');
+          return;
+        }
+        setFeedbackTransition({
+          kind: 'next_trial',
+          nextTrialIndex: nextTrial,
+          nextPlan,
+        });
         return;
       }
 
       if (currentRunIndex === 1) {
-        feedbackHandle = window.setTimeout(() => {
-          setFixationFeedback('neutral');
-          setPhase('transition');
-          setCurrentRunIndex(2);
-          setCurrentTrialIndex(1);
-          setActivePlan(null);
-          setStatusText(
-            'End of Run 1. Run 2 will start now. Instruction reminder: keep fixation and answer catch question quickly and accurately.',
-          );
-        }, FEEDBACK_DURATION_MS);
+        setFeedbackTransition({
+          kind: 'to_transition',
+        });
         return;
       }
 
-      feedbackHandle = window.setTimeout(() => {
-        setFixationFeedback('neutral');
-        const finalized = finalizeSession(updated, new Date().toISOString());
-        finalized.summary = summarizeSession(finalized.trials);
-        setSession(finalized);
-        setExports(buildExportArtifacts(finalized));
-        setPhase('session_complete');
-        setActivePlan(null);
-        setStatusText('Practice complete. Review summary and export files.');
-      }, FEEDBACK_DURATION_MS);
+      const finalized = finalizeSession(updated, new Date().toISOString());
+      finalized.summary = summarizeSession(finalized.trials);
+      setFeedbackTransition({
+        kind: 'to_complete',
+        finalizedSession: finalized,
+      });
     };
 
     const keyHandler = (event: KeyboardEvent) => {
@@ -469,21 +477,52 @@ function App() {
       return () => {
         window.clearTimeout(autoHandle);
         window.clearTimeout(timeoutHandle);
-        if (feedbackHandle !== null) {
-          window.clearTimeout(feedbackHandle);
-        }
         window.removeEventListener('keydown', keyHandler);
       };
     }
 
     return () => {
       window.clearTimeout(timeoutHandle);
-      if (feedbackHandle !== null) {
-        window.clearTimeout(feedbackHandle);
-      }
       window.removeEventListener('keydown', keyHandler);
     };
   }, [activePlan, currentRunIndex, phase, query.testMode, session]);
+
+  // Section: feedback timing gate; advances to next trial/phase after fixation color feedback.
+  useEffect(() => {
+    if (phase !== 'feedback' || !feedbackTransition) {
+      return;
+    }
+
+    const timeoutHandle = window.setTimeout(() => {
+      setFixationFeedback('neutral');
+
+      if (feedbackTransition.kind === 'next_trial') {
+        setCurrentTrialIndex(feedbackTransition.nextTrialIndex);
+        setActivePlan(feedbackTransition.nextPlan);
+        setPhase('trial');
+      } else if (feedbackTransition.kind === 'to_transition') {
+        setPhase('transition');
+        setCurrentRunIndex(2);
+        setCurrentTrialIndex(1);
+        setActivePlan(null);
+        setStatusText(
+          'End of Run 1. Run 2 will start now. Instruction reminder: keep fixation and answer catch question quickly and accurately.',
+        );
+      } else {
+        setSession(feedbackTransition.finalizedSession);
+        setExports(buildExportArtifacts(feedbackTransition.finalizedSession));
+        setPhase('session_complete');
+        setActivePlan(null);
+        setStatusText('Practice complete. Review summary and export files.');
+      }
+
+      setFeedbackTransition(null);
+    }, FEEDBACK_DURATION_MS);
+
+    return () => {
+      window.clearTimeout(timeoutHandle);
+    };
+  }, [feedbackTransition, phase]);
 
   // Section: feedback phase draws one static end-of-trial frame with colored fixation.
   useEffect(() => {
@@ -597,6 +636,7 @@ function App() {
     setCurrentRunIndex(1);
     setCurrentTrialIndex(1);
     setFixationFeedback('neutral');
+    setFeedbackTransition(null);
     setPhase('setup');
     setStatusText('Ready for a new practice attempt.');
   }, []);

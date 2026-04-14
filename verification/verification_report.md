@@ -1,6 +1,6 @@
 # Verification Report
 
-Generated at: 2026-04-14T12:47:48.213Z
+Generated at: 2026-04-14T12:52:04.440Z
 
 ## Check 1: Refresh-aware input generation
 - PASS: 120 Hz and 60 Hz datasets generated deterministically.
