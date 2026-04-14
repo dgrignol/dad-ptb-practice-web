@@ -49,9 +49,12 @@ type UiPhase =
   | 'initializing'
   | 'trial'
   | 'question'
+  | 'feedback'
   | 'transition'
   | 'session_complete'
   | 'error';
+
+type FixationFeedback = 'neutral' | 'correct' | 'incorrect';
 
 const ARENA_X_MIN = -5;
 const ARENA_X_MAX = 5;
@@ -60,6 +63,7 @@ const ARENA_Y_MAX = 5;
 
 const DOT_WIDTH_DEG = 0.51442;
 const DOT_RADIUS_DEG = DOT_WIDTH_DEG / 2;
+const FEEDBACK_DURATION_MS = 300;
 
 function App() {
   const query = useMemo(() => parseQueryOverrides(window.location.search), []);
@@ -94,6 +98,7 @@ function App() {
   const [currentTrialIndex, setCurrentTrialIndex] = useState<number>(1);
   const [activePlan, setActivePlan] = useState<PracticeTrialPlan | null>(null);
   const [questionPromptText, setQuestionPromptText] = useState<string>('');
+  const [fixationFeedback, setFixationFeedback] = useState<FixationFeedback>('neutral');
 
   // Section: drawing and timing refs used by animation/question logic.
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -246,6 +251,7 @@ function App() {
         setExports(null);
         setCurrentRunIndex(1);
         setCurrentTrialIndex(1);
+        setFixationFeedback('neutral');
         setStatusText('Run 1 started. Keep fixation and answer catch question quickly and accurately.');
 
         const firstPlan = skeleton.runPlans.run1[0];
@@ -333,6 +339,7 @@ function App() {
 
     questionStartMsRef.current = performance.now();
     let resolved = false;
+    let feedbackHandle: number | null = null;
 
     const commitResponse = (responseCode: 0 | 1 | 2, timedOut: boolean) => {
       if (resolved) {
@@ -391,35 +398,47 @@ function App() {
             ? `Correct (${responseLabel.toUpperCase()}).`
             : `Incorrect (${responseLabel.toUpperCase()}).`,
       );
+      const feedback: FixationFeedback = timedOut || responseCorrect !== 1 ? 'incorrect' : 'correct';
+      setFixationFeedback(feedback);
+      setPhase('feedback');
 
       const runPlans = currentRunIndex === 1 ? updated.runPlans.run1 : updated.runPlans.run2;
       const nextTrial = plan.executedTrialIndex + 1;
 
       if (nextTrial <= runPlans.length) {
-        setCurrentTrialIndex(nextTrial);
-        setActivePlan(runPlans[nextTrial - 1]);
-        setPhase('trial');
+        feedbackHandle = window.setTimeout(() => {
+          setFixationFeedback('neutral');
+          setCurrentTrialIndex(nextTrial);
+          setActivePlan(runPlans[nextTrial - 1]);
+          setPhase('trial');
+        }, FEEDBACK_DURATION_MS);
         return;
       }
 
       if (currentRunIndex === 1) {
-        setPhase('transition');
-        setCurrentRunIndex(2);
-        setCurrentTrialIndex(1);
-        setActivePlan(null);
-        setStatusText(
-          'End of Run 1. Run 2 will start now. Instruction reminder: keep fixation and answer catch question quickly and accurately.',
-        );
+        feedbackHandle = window.setTimeout(() => {
+          setFixationFeedback('neutral');
+          setPhase('transition');
+          setCurrentRunIndex(2);
+          setCurrentTrialIndex(1);
+          setActivePlan(null);
+          setStatusText(
+            'End of Run 1. Run 2 will start now. Instruction reminder: keep fixation and answer catch question quickly and accurately.',
+          );
+        }, FEEDBACK_DURATION_MS);
         return;
       }
 
-      const finalized = finalizeSession(updated, new Date().toISOString());
-      finalized.summary = summarizeSession(finalized.trials);
-      setSession(finalized);
-      setExports(buildExportArtifacts(finalized));
-      setPhase('session_complete');
-      setActivePlan(null);
-      setStatusText('Practice complete. Review summary and export files.');
+      feedbackHandle = window.setTimeout(() => {
+        setFixationFeedback('neutral');
+        const finalized = finalizeSession(updated, new Date().toISOString());
+        finalized.summary = summarizeSession(finalized.trials);
+        setSession(finalized);
+        setExports(buildExportArtifacts(finalized));
+        setPhase('session_complete');
+        setActivePlan(null);
+        setStatusText('Practice complete. Review summary and export files.');
+      }, FEEDBACK_DURATION_MS);
     };
 
     const keyHandler = (event: KeyboardEvent) => {
@@ -450,15 +469,55 @@ function App() {
       return () => {
         window.clearTimeout(autoHandle);
         window.clearTimeout(timeoutHandle);
+        if (feedbackHandle !== null) {
+          window.clearTimeout(feedbackHandle);
+        }
         window.removeEventListener('keydown', keyHandler);
       };
     }
 
     return () => {
       window.clearTimeout(timeoutHandle);
+      if (feedbackHandle !== null) {
+        window.clearTimeout(feedbackHandle);
+      }
       window.removeEventListener('keydown', keyHandler);
     };
   }, [activePlan, currentRunIndex, phase, query.testMode, session]);
+
+  // Section: feedback phase draws one static end-of-trial frame with colored fixation.
+  useEffect(() => {
+    if (phase !== 'feedback' || !activePlan || !inputDataset) {
+      return;
+    }
+
+    const canvas = canvasRef.current;
+    if (!canvas) {
+      return;
+    }
+
+    const context = canvas.getContext('2d');
+    if (!context) {
+      return;
+    }
+
+    const source = sourceTrialByIndex(inputDataset, activePlan.sourceIndex);
+    const altSource =
+      activePlan.catchAltSourceIndex !== null
+        ? sourceTrialByIndex(inputDataset, activePlan.catchAltSourceIndex)
+        : null;
+
+    drawTrialFrame({
+      context,
+      canvas,
+      source,
+      altSource,
+      plan: activePlan,
+      runIndex: currentRunIndex,
+      frameIndex: Math.max(0, inputDataset.framesPerTrial - 1),
+      fixationFeedback,
+    });
+  }, [activePlan, currentRunIndex, fixationFeedback, inputDataset, phase]);
 
   // Section: transition gate between run 1 and run 2.
   useEffect(() => {
@@ -537,6 +596,7 @@ function App() {
     setActivePlan(null);
     setCurrentRunIndex(1);
     setCurrentTrialIndex(1);
+    setFixationFeedback('neutral');
     setPhase('setup');
     setStatusText('Ready for a new practice attempt.');
   }, []);
@@ -613,7 +673,12 @@ function App() {
             onClick={() => {
               void initializePracticeSession();
             }}
-            disabled={phase === 'initializing' || phase === 'trial' || phase === 'question'}
+            disabled={
+              phase === 'initializing' ||
+              phase === 'trial' ||
+              phase === 'question' ||
+              phase === 'feedback'
+            }
           >
             {phase === 'initializing' ? 'Preparing...' : 'Start Practice'}
           </button>
@@ -756,13 +821,14 @@ interface DrawTrialFrameArgs {
   plan: PracticeTrialPlan;
   runIndex: 1 | 2;
   frameIndex: number;
+  fixationFeedback?: FixationFeedback;
 }
 
 /**
  * Draw one animation frame for the currently active trial plan.
  */
 function drawTrialFrame(args: DrawTrialFrameArgs): void {
-  const { context, canvas, source, altSource, plan, runIndex, frameIndex } = args;
+  const { context, canvas, source, altSource, plan, runIndex, frameIndex, fixationFeedback = 'neutral' } = args;
   const frameOneBased = frameIndex + 1;
   const arenaRect = getArenaRect(canvas);
 
@@ -777,26 +843,13 @@ function drawTrialFrame(args: DrawTrialFrameArgs): void {
   context.lineWidth = 2;
   context.strokeRect(arenaRect.x, arenaRect.y, arenaRect.size, arenaRect.size);
 
-  // Section: render run-2 occluder path-band with PTB-like pre/post activation.
-  if (runIndex === 2 && source.occlusionEnabled) {
-    const drawPre = frameOneBased < source.pathbandPreAnchorFrame;
-    const drawPost =
-      frameOneBased >= source.pathbandPostAnchorFrame &&
-      frameOneBased <= source.pathbandPostDeactivateFrame;
-
-    if (drawPre) {
-      drawPathbandPolyline(context, canvas, source.pathbandPreXY, source.pathbandWidthDeg, source.pathbandTerminalStyle);
-    }
-    if (drawPost) {
-      drawPathbandPolyline(
-        context,
-        canvas,
-        source.pathbandPostXY,
-        source.pathbandWidthDeg,
-        source.pathbandTerminalStyle,
-      );
-    }
-  }
+  // Section: precompute run-2 occluder activation and draw it later on top of the dot.
+  const drawPreOccluder = runIndex === 2 && source.occlusionEnabled && frameOneBased < source.pathbandPreAnchorFrame;
+  const drawPostOccluder =
+    runIndex === 2 &&
+    source.occlusionEnabled &&
+    frameOneBased >= source.pathbandPostAnchorFrame &&
+    frameOneBased <= source.pathbandPostDeactivateFrame;
 
   // Section: resolve active position and visibility according to catch logic.
   let point = source.xy[Math.min(frameIndex, source.xy.length - 1)];
@@ -836,9 +889,18 @@ function drawTrialFrame(args: DrawTrialFrameArgs): void {
     context.fill();
   }
 
+  // Section: render run-2 occluder after dot so it truly occludes stimulus pixels.
+  if (drawPreOccluder) {
+    drawPathbandPolyline(context, canvas, source.pathbandPreXY, source.pathbandWidthDeg, source.pathbandTerminalStyle);
+  }
+  if (drawPostOccluder) {
+    drawPathbandPolyline(context, canvas, source.pathbandPostXY, source.pathbandWidthDeg, source.pathbandTerminalStyle);
+  }
+
   const cx = canvas.width / 2;
   const cy = canvas.height / 2;
-  context.strokeStyle = '#e5e7eb';
+  context.strokeStyle =
+    fixationFeedback === 'correct' ? '#22c55e' : fixationFeedback === 'incorrect' ? '#ef4444' : '#e5e7eb';
   context.lineWidth = 2;
   context.beginPath();
   context.moveTo(cx - 10, cy);
