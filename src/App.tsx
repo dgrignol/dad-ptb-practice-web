@@ -982,7 +982,9 @@ function drawTrialFrame(args: DrawTrialFrameArgs): void {
     frameOneBased <= source.pathbandPostDeactivateFrame;
 
   // Section: resolve active position and visibility according to catch logic.
-  let point = source.xy[Math.min(frameIndex, source.xy.length - 1)];
+  const fallbackPoint = source.xy.find(isFinitePoint) ?? { x: 0, y: 0 };
+  const sourcePoint = source.xy[Math.min(frameIndex, Math.max(0, source.xy.length - 1))];
+  let point = isFinitePoint(sourcePoint) ? sourcePoint : fallbackPoint;
   let visible = true;
 
   if (runIndex === 1 && plan.catchTypeCode === 1) {
@@ -1002,7 +1004,10 @@ function drawTrialFrame(args: DrawTrialFrameArgs): void {
       plan.catchReappearFrame !== null &&
       frameOneBased >= plan.catchReappearFrame
     ) {
-      point = altSource.xy[Math.min(frameIndex, altSource.xy.length - 1)];
+      const altPoint = altSource.xy[Math.min(frameIndex, Math.max(0, altSource.xy.length - 1))];
+      if (isFinitePoint(altPoint)) {
+        point = altPoint;
+      }
     }
   }
 
@@ -1088,11 +1093,16 @@ function drawIdleFrame(
 function drawPathbandPolyline(
   context: CanvasRenderingContext2D,
   canvas: HTMLCanvasElement,
-  points: Array<{ x: number; y: number }>,
+  points: Array<{ x: number; y: number }> | undefined,
   widthDeg: number,
   terminalStyle: 'round' | 'straight',
 ): void {
-  if (points.length < 2) {
+  if (!Array.isArray(points)) {
+    return;
+  }
+
+  const validPoints = points.filter(isFinitePoint);
+  if (validPoints.length < 2) {
     return;
   }
 
@@ -1102,8 +1112,8 @@ function drawPathbandPolyline(
   context.lineJoin = 'round';
   context.beginPath();
 
-  for (let i = 0; i < points.length; i += 1) {
-    const pt = toCanvas(points[i], canvas);
+  for (let i = 0; i < validPoints.length; i += 1) {
+    const pt = toCanvas(validPoints[i], canvas);
     if (i === 0) {
       context.moveTo(pt.x, pt.y);
     } else {
@@ -1124,6 +1134,9 @@ function isPointFullyOccludedByPathband(
   point: { x: number; y: number },
   frameOneBased: number,
 ): boolean {
+  const prePath = Array.isArray(source.pathbandPreXY) ? source.pathbandPreXY : [];
+  const postPath = Array.isArray(source.pathbandPostXY) ? source.pathbandPostXY : [];
+
   const preActive = frameOneBased < source.pathbandPreAnchorFrame;
   const postActive =
     frameOneBased >= source.pathbandPostAnchorFrame &&
@@ -1132,10 +1145,10 @@ function isPointFullyOccludedByPathband(
   let minDistance = Number.POSITIVE_INFINITY;
 
   if (preActive) {
-    minDistance = Math.min(minDistance, distancePointToPolyline(point, source.pathbandPreXY));
+    minDistance = Math.min(minDistance, distancePointToPolyline(point, prePath));
   }
   if (postActive) {
-    minDistance = Math.min(minDistance, distancePointToPolyline(point, source.pathbandPostXY));
+    minDistance = Math.min(minDistance, distancePointToPolyline(point, postPath));
   }
 
   // Fallback to precomputed frame bounds if geometry cannot be resolved.
@@ -1147,13 +1160,14 @@ function isPointFullyOccludedByPathband(
 }
 
 function distancePointToPolyline(point: { x: number; y: number }, polyline: Array<{ x: number; y: number }>): number {
-  if (polyline.length < 2) {
+  const validPolyline = polyline.filter(isFinitePoint);
+  if (validPolyline.length < 2) {
     return Number.POSITIVE_INFINITY;
   }
 
   let minDistance = Number.POSITIVE_INFINITY;
-  for (let i = 0; i < polyline.length - 1; i += 1) {
-    const distance = distancePointToSegment(point, polyline[i], polyline[i + 1]);
+  for (let i = 0; i < validPolyline.length - 1; i += 1) {
+    const distance = distancePointToSegment(point, validPolyline[i], validPolyline[i + 1]);
     minDistance = Math.min(minDistance, distance);
   }
 
@@ -1210,6 +1224,13 @@ function degToCanvasDistance(distanceDeg: number, canvas: HTMLCanvasElement): nu
 function toCanvas(point: { x: number; y: number }, canvas: HTMLCanvasElement): { x: number; y: number } {
   const arenaRect = getArenaRect(canvas);
 
+  if (!isFinitePoint(point)) {
+    return {
+      x: arenaRect.x + arenaRect.size / 2,
+      y: arenaRect.y + arenaRect.size / 2,
+    };
+  }
+
   const nx = (point.x - ARENA_X_MIN) / (ARENA_X_MAX - ARENA_X_MIN);
   const ny = (point.y - ARENA_Y_MIN) / (ARENA_Y_MAX - ARENA_Y_MIN);
 
@@ -1217,6 +1238,14 @@ function toCanvas(point: { x: number; y: number }, canvas: HTMLCanvasElement): {
     x: arenaRect.x + nx * arenaRect.size,
     y: arenaRect.y + ny * arenaRect.size,
   };
+}
+
+function isFinitePoint(point: unknown): point is { x: number; y: number } {
+  if (!point || typeof point !== 'object') {
+    return false;
+  }
+  const maybePoint = point as { x?: unknown; y?: unknown };
+  return Number.isFinite(maybePoint.x) && Number.isFinite(maybePoint.y);
 }
 
 interface SummaryTableProps {

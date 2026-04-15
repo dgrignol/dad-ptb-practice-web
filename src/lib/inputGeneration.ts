@@ -104,12 +104,15 @@ export function getOrCreateSharedInputForFps(args: InputSelectionArgs): InputSel
   const storageKey = `${STORAGE_PREFIX}::${DATASET_VERSION}::${fps}Hz`;
 
   const existing = tryReadDataset(storageKey);
-  if (existing && existing.datasetVersion === DATASET_VERSION && existing.fps === fps) {
+  if (existing && isValidCachedDataset(existing, fps)) {
     return {
       dataset: existing,
       wasGenerated: false,
       storageKey,
     };
+  }
+  if (existing) {
+    tryRemoveDataset(storageKey);
   }
 
   const generated = generateSharedDataset({
@@ -703,6 +706,62 @@ function tryReadDataset(storageKey: string): SharedInputDataset | null {
   } catch {
     return null;
   }
+}
+
+function tryRemoveDataset(storageKey: string): void {
+  try {
+    window.localStorage.removeItem(storageKey);
+  } catch {
+    // Ignore cache cleanup failures.
+  }
+}
+
+function isValidCachedDataset(dataset: SharedInputDataset, expectedFps: number): boolean {
+  if (dataset.datasetVersion !== DATASET_VERSION) {
+    return false;
+  }
+  if (!Number.isFinite(dataset.fps) || Math.round(dataset.fps) !== Math.round(expectedFps)) {
+    return false;
+  }
+  if (!Number.isFinite(dataset.framesPerTrial) || dataset.framesPerTrial < 2) {
+    return false;
+  }
+  if (!Array.isArray(dataset.sourceTrials) || dataset.sourceTrials.length === 0) {
+    return false;
+  }
+
+  const frames = Math.round(dataset.framesPerTrial);
+
+  for (const trial of dataset.sourceTrials) {
+    if (!Array.isArray(trial.xy) || trial.xy.length !== frames) {
+      return false;
+    }
+    if (!trial.xy.every(isFinitePoint)) {
+      return false;
+    }
+    if (!Array.isArray(trial.pathbandPreXY) || trial.pathbandPreXY.length < 2) {
+      return false;
+    }
+    if (!Array.isArray(trial.pathbandPostXY) || trial.pathbandPostXY.length < 2) {
+      return false;
+    }
+    if (!trial.pathbandPreXY.every(isFinitePoint) || !trial.pathbandPostXY.every(isFinitePoint)) {
+      return false;
+    }
+    if (typeof trial.pathId !== 'string' || trial.pathId.length === 0) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+function isFinitePoint(point: unknown): point is Point2D {
+  if (!point || typeof point !== 'object') {
+    return false;
+  }
+  const maybePoint = point as { x?: unknown; y?: unknown };
+  return Number.isFinite(maybePoint.x) && Number.isFinite(maybePoint.y);
 }
 
 /**
